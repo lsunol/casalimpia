@@ -199,9 +199,9 @@ def train_lora(pipe, dataloader, num_epochs=5, lr=5e-5):
 # Main Function
 def main():
     # Paths
-    empty_rooms_dir = "./emptyRooms"
-    manual_masks_dir = "./manualMasks"
-    automatic_masks_dir = "./automaticMasks"
+    empty_rooms_dir = "./back/data/emptyRooms"
+    manual_masks_dir = "./back/data/manualMasks"
+    automatic_masks_dir = "./back/data/automaticMasks"
     masks_dir = automatic_masks_dir
     model_id = "stabilityai/stable-diffusion-2-inpainting"
 
