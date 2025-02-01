@@ -9,6 +9,8 @@ from diffusers import StableDiffusionInpaintPipeline
 from tqdm import tqdm
 from peft import LoraConfig, get_peft_model
 import torchvision
+from diffusers import AutoencoderKL
+from safetensors.torch import save_file  # Asegúrate de tener safetensors instalado
 
 # Select GPU if available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -110,7 +112,12 @@ def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512):
 # Setup LoRA Model
 def setup_model_with_lora(model_id):
     pipe = StableDiffusionInpaintPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
-    
+
+    # version from ChatGPT
+    vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae").to(device)  # Añade esto
+    vae.requires_grad_(False) 
+    pipe.vae = vae
+
     # Inspect available modules in the UNet
     # print("Available modules in UNet:")                                                         
     supported_modules = []
@@ -137,7 +144,6 @@ def setup_model_with_lora(model_id):
     pipe.unet = get_peft_model(pipe.unet, lora_config)
     return pipe
 
-
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
 def train_lora(pipe, dataloader, num_epochs=5, lr=5e-5):
     optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=lr)
@@ -149,38 +155,50 @@ def train_lora(pipe, dataloader, num_epochs=5, lr=5e-5):
 
         for input_images, input_masks, targets in tqdm(dataloader):
 
-            print("inputs shape:", input_images.shape)
-            # Separate images and masks
-            print("masks shape:", input_masks.shape)
+            # Move to device
+            input_images = input_images.to(device).to(torch.float16)
+            input_masks = input_masks.to(device).to(torch.float16)
+            targets = targets.to(device).to(torch.float16)
 
-            input_images = input_images.to(device).to(torch.float16)  # Image: 3 channels
-            input_masks = input_masks.to(device).to(torch.float16)    # Mask: 1 channel
-            targets = targets.to(device).to(torch.float16)  # Target image
-            print("targets shape:", targets.shape)
+            # Codificar imágenes en el espacio latente
+            # latents = pipe.vae.encode(input_images).latent_dist.sample() * pipe.vae.config.scaling_factor
+            latents = pipe.vae.encode(input_images.to(torch.float32)).latent_dist.sample() * pipe.vae.config.scaling_factor
 
-            # Concatenate image and mask: 4 channels (3 image + 1 mask)
-            combined_inputs = torch.cat([input_images, input_masks], dim=1)
-            print("combined_inputs shape:", combined_inputs.shape)
+            # Codificar imágenes objetivo (targets) en el espacio latente
+            # target_latents = pipe.vae.encode(targets).latent_dist.sample() * pipe.vae.config.scaling_factor
+            target_latents = pipe.vae.encode(targets.to(torch.float32)).latent_dist.sample() * pipe.vae.config.scaling_factor
 
-            # Check input dimensions
-            assert combined_inputs.shape[1] == 4, f"Expected 4 channels, got {combined_inputs.shape[1]}"
+            # Redimensionar las máscaras al tamaño de los latentes
+            masks_resized = torch.nn.functional.interpolate(input_masks, size=latents.shape[-2:])
+            
+            # Concatenar latentes y máscaras
+            combined_inputs = torch.cat([latents, masks_resized], dim=1)
 
-            # Generate random timesteps and hidden states
+            # Asegurarse de que haya 9 canales:
+            # Concatenamos latentes (4), máscaras (1), y otra copia de latentes (4) => Total = 9 canales
+            combined_inputs = torch.cat([latents, masks_resized, latents], dim=1)
+
+            # Generar ruido y añadirlo a los latentes
             batch_size = combined_inputs.shape[0]
-            timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (batch_size,), device=input_images.device).long()
-            encoder_hidden_states = pipe.text_encoder(
-                pipe.tokenizer([""] * batch_size, return_tensors="pt", padding=True, truncation=True).input_ids.to(input_images.device)
-            )[0]
+            timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (batch_size,), device=device).long()
+            noise = torch.randn_like(combined_inputs)
+            noisy_inputs = combined_inputs + noise  # Añadimos el ruido
 
-            # Add noise to inputs
-            noise = torch.randn_like(combined_inputs)  # Random noise
-            noisy_inputs = combined_inputs + noise
+            # Codificación del prompt vacío (sin texto)
+            encoder_hidden_states = pipe.text_encoder(
+                pipe.tokenizer([""] * batch_size, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
+            )[0].to(torch.float16)
+
+            noisy_inputs = noisy_inputs.to(torch.float16)
+            encoder_hidden_states = encoder_hidden_states.to(torch.float16)
 
             # Forward pass through the UNet
             outputs = pipe.unet(noisy_inputs, timesteps, encoder_hidden_states).sample
+            outputs = outputs.to(torch.float16)
+            target_latents = target_latents.to(torch.float16)
 
             # Compute loss
-            loss = torch.nn.functional.mse_loss(outputs, targets)
+            loss = torch.nn.functional.mse_loss(outputs, target_latents)
 
             # Backpropagation
             optimizer.zero_grad()
@@ -193,11 +211,12 @@ def train_lora(pipe, dataloader, num_epochs=5, lr=5e-5):
 
     # Save LoRA weights
     print("Training complete. Saving LoRA weights...")
-    pipe.unet.save_pretrained("./lora_weights")
+    pipe.unet.save_pretrained("./back/data/lora_weights")
 
 
 # Main Function
 def main():
+
     # Paths
     empty_rooms_dir = "./back/data/emptyRooms"
     manual_masks_dir = "./back/data/manualMasks"
