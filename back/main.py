@@ -234,7 +234,7 @@ def read_parameters():
     parser.add_argument("--masks-dir", type=str, required=True, help="Dataset folder containing images of masks")
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs for training")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size for training")
-    parser.add_argument("--output-dir", type=str, default="./data", help="Output directory for saving LoRA weights")
+    parser.add_argument("--output-dir", type=str, default="./data/trained_lora", help="Output directory for saving LoRA weights")
 
     args = parser.parse_args()
 
