@@ -5,13 +5,29 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Run Alex-LoRA",
+            "name": "Train full dataset",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/back/main.py",
             "console": "integratedTerminal",
             "args": [
-                "${command:pickArgs}"
+                "--empty-rooms-dir=D:\\SynologyDrive\\PG in AI\\projecte casalimpia\\datasets\\merged-unique-unwatermark-jpg",
+                "--masks-dir=D:\\SynologyDrive\\PG in AI\\projecte casalimpia\\datasets\\automatic_masks",
+                "--epochs=20",
+                "--batch-size=4",
+            ]
+        },
+        {
+            "name": "Train 10 images",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/back/main.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--empty-rooms-dir=${workspaceFolder}/back/data/emptyRooms",
+                "--masks-dir=${workspaceFolder}/back/data/automaticMasks",
+                "--epochs=20",
+                "--batch-size=4",
             ]
         }
     ]
