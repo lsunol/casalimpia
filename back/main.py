@@ -11,10 +11,21 @@ from peft import LoraConfig, get_peft_model
 import torchvision
 from diffusers import AutoencoderKL
 from safetensors.torch import save_file  # Asegúrate de tener safetensors instalado
+import argparse
+from typing import Optional
+from datetime import datetime
 
 # Select GPU if available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Device:", device)
+
+import torch
+
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_math_sdp(True)
+
 
 # Setup Inpainting Pipeline: CARGA DIFFUSSION MODEL y lo manda a GPU
 def setup_inpainting_pipeline():
@@ -211,30 +222,51 @@ def train_lora(pipe, dataloader, num_epochs=5, lr=5e-5):
 
     # Save LoRA weights
     print("Training complete. Saving LoRA weights...")
-    pipe.unet.save_pretrained("./back/data/lora_weights")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    num_images = len(dataloader.dataset)
+    pipe.unet.save_pretrained(f"./back/data/{timestamp}_lora_weights_{num_epochs}_epochs_{num_images}_images")
 
+
+def read_parameters():
+
+    parser = argparse.ArgumentParser(description="Entrenar modelo de segmentación con LoRA")
+    parser.add_argument("--empty-rooms-dir", type=str, required=True, help="Dataset folder containing images of empty rooms")
+    parser.add_argument("--masks-dir", type=str, required=True, help="Dataset folder containing images of masks")
+    parser.add_argument("--epochs", type=int, default=5, help="Number of epochs for training")
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size for training")
+    parser.add_argument("--output-dir", type=str, default="./data", help="Output directory for saving LoRA weights")
+
+    args = parser.parse_args()
+
+    return args.empty_rooms_dir, args.masks_dir, args.epochs, args.batch_size
 
 # Main Function
 def main():
+    
+    timestamp_format = "%Y%m%d_%H%M%S"
+    initial_timestamp = datetime.now()
 
-    # Paths
-    empty_rooms_dir = "./back/data/emptyRooms"
-    manual_masks_dir = "./back/data/manualMasks"
-    automatic_masks_dir = "./back/data/automaticMasks"
-    masks_dir = automatic_masks_dir
+    empty_rooms_dir, masks_dir, epochs, batch_size = read_parameters()
+
     model_id = "stabilityai/stable-diffusion-2-inpainting"
 
     # Merge inputs and masks
     # merge_inputs_and_masks(empty_rooms_dir, masks_dir, inputs_dir)
 
     # Load dataset
-    dataloader = load_dataset(inputs_dir=empty_rooms_dir, masks_dir=masks_dir, batch_size=4, img_size=512)
+    dataloader = load_dataset(inputs_dir=empty_rooms_dir, masks_dir=masks_dir, batch_size=batch_size, img_size=512)
 
     # Setup model with LoRA
     pipe = setup_model_with_lora(model_id)
 
     # Train LoRA
-    train_lora(pipe, dataloader)
+    train_lora(pipe, dataloader, num_epochs=epochs)
+
+    final_timestamp = datetime.now()
+    print(f"Training completed. Initial timestamp: {initial_timestamp.strftime(timestamp_format)}.")
+    print(f"Final timestamp: {final_timestamp.strftime(timestamp_format)}.")
+    elapsed_time = final_timestamp - initial_timestamp
+    print(f"Elapsed time in seconds: {elapsed_time.total_seconds()}.")
 
 if __name__ == "__main__":
     main()
