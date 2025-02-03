@@ -145,6 +145,8 @@ def read_parameters():
 # Main Function
 def main():
     
+    # nueva línea
+
     initial_timestamp = datetime.now()
 
     empty_rooms_dir, masks_dir, epochs, batch_size, output_dir = read_parameters()
