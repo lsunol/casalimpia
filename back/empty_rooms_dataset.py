@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.utils
 import torchvision.transforms as transforms
 from PIL import Image
 
@@ -35,7 +36,9 @@ class InpaintingDataset(torch.utils.data.Dataset):
         return input_image, mask_image, input_image 
 
 # Load Dataset: prepara DataLoader para el batch training. INPUT are resized to (3, img_size, img_size)
-def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512):
+def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
+
+    assert abs((train_ratio + val_ratio + test_ratio) - 1) < 1e-5, "The sum of train_ratio, val_ratio, and test_ratio must be equal to 1."
 
     images_transforms = transforms.Compose([
         transforms.Resize((img_size, img_size)),
@@ -48,17 +51,30 @@ def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512):
         transforms.ToTensor()
     ])
 
-    dataset = InpaintingDataset(
+    full_dataset = InpaintingDataset(
         inputs_dir=inputs_dir,
         masks_dir=masks_dir,
         image_transforms=images_transforms,
         masks_transforms=masks_transforms
     )
     
-    dataset = InpaintingDataset(inputs_dir, masks_dir, images_transforms, masks_transforms)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataset_size = len(full_dataset)
+    train_size = int(train_ratio * dataset_size)
+    val_size = int(val_ratio * dataset_size)
+    test_size = dataset_size - train_size - val_size
+    print(f"Train size: {train_size}, Validation size: {val_size}, Test size: {test_size}")
 
-    return dataloader
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
+        full_dataset,
+        [train_size, val_size, test_size], 
+        generator=torch.Generator().manual_seed(seed)
+    )
+
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    return train_loader, val_loader, test_loader
 
 # Merge Inputs and Masks: combina img de habitación vacia con mascara y salva el conjunto en "output_dir"
 # def merge_inputs_and_masks(empty_rooms_dir, masks_dir, output_dir):
