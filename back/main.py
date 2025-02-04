@@ -59,7 +59,7 @@ def setup_model_with_lora(model_id):
     return pipe
 
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
-def train_lora(pipe, dataloader, output_dir="back/data", num_epochs=5, lr=5e-5):
+def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/data", num_epochs=5, lr=5e-5):
     optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=lr)
     pipe.unet.train()
 
@@ -67,7 +67,7 @@ def train_lora(pipe, dataloader, output_dir="back/data", num_epochs=5, lr=5e-5):
         print(f"Epoch {epoch + 1}/{num_epochs}")
         epoch_loss = 0.0
 
-        for input_images, input_masks, targets in tqdm(dataloader):
+        for input_images, input_masks, targets in tqdm(train_loader):
 
             # Move to device
             input_images = input_images.to(device).to(torch.float16)
@@ -119,12 +119,12 @@ def train_lora(pipe, dataloader, output_dir="back/data", num_epochs=5, lr=5e-5):
 
             epoch_loss += loss.item()
 
-        print(f"Epoch Loss: {epoch_loss / len(dataloader)}")
+        print(f"Epoch Loss: {epoch_loss / len(train_loader)}")
 
     # Save LoRA weights
     print("Training complete. Saving LoRA weights...")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    num_images = len(dataloader.dataset)
+    num_images = len(train_loader.dataset)
     pipe.unet.save_pretrained(f"{output_dir}/{timestamp}_lora_weights_{num_epochs}_epochs_{num_images}_images")
 
 def read_parameters():
@@ -147,11 +147,19 @@ def main():
 
     empty_rooms_dir, masks_dir, epochs, batch_size, output_dir = read_parameters()
 
-    dataloader = load_dataset(inputs_dir=empty_rooms_dir, masks_dir=masks_dir, batch_size=batch_size, img_size=512)
+    train_loader, val_loader, test_loader = load_dataset(
+        inputs_dir=empty_rooms_dir, 
+        masks_dir=masks_dir, 
+        batch_size=batch_size, 
+        img_size=512,
+        train_ratio=0.7,
+        val_ratio=0.15,
+        test_ratio=0.15,
+        seed=42)
 
     pipe = setup_model_with_lora(MODEL_ID)
 
-    train_lora(pipe, dataloader, num_epochs=epochs, output_dir=output_dir)
+    train_lora(pipe, train_loader, test_loader, val_loader, num_epochs=epochs, output_dir=output_dir)
 
     final_timestamp = datetime.now()
     print(f"Training completed. Initial timestamp: {initial_timestamp.strftime(TIMESTAMP_FORMAT)}.")
