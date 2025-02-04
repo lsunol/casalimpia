@@ -163,3 +163,5 @@ cython_debug/
 
 .vscode/
 **/trained_lora/
+**/lora_weights/
+**/lora_weights/*

@@ -85,11 +85,9 @@ def train_lora(pipe, dataloader, output_dir="back/data", num_epochs=5, lr=5e-5):
             # Redimensionar las máscaras al tamaño de los latentes
             masks_resized = torch.nn.functional.interpolate(input_masks, size=latents.shape[-2:])
             
-            # Concatenar latentes y máscaras
-            combined_inputs = torch.cat([latents, masks_resized], dim=1)
-
-            # Asegurarse de que haya 9 canales:
-            # Concatenamos latentes (4), máscaras (1), y otra copia de latentes (4) => Total = 9 canales
+            # Concatenar latentes y máscaras. Asegurarse de que haya 9 canales:
+            # latentes (4), máscaras (1), y otra copia de latentes (4) => Total = 9 canales
+            # TODO: cambiar los 4 últimos latentes por los latents de combinación de imagen + máscara
             combined_inputs = torch.cat([latents, masks_resized, latents], dim=1)
 
             # Generar ruido y añadirlo a los latentes
@@ -145,8 +143,6 @@ def read_parameters():
 # Main Function
 def main():
     
-    # nueva línea
-
     initial_timestamp = datetime.now()
 
     empty_rooms_dir, masks_dir, epochs, batch_size, output_dir = read_parameters()
