@@ -123,6 +123,19 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
 
     optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=lr)
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    train_dir = f"{output_dir}/lora_trains/{timestamp}/"
+    os.makedirs(train_dir, exist_ok=True)
+
+    optimizer = torch.optim.AdamW(train_pipe.unet.parameters(), lr=lr)
+    train_pipe.unet.train()
+
+    # Create inference pipeline for generating epoch-progression samples
+    inference_pipe = StableDiffusionInpaintPipeline.from_pretrained(
+        MODEL_ID, torch_dtype=torch.float16).to(device)
+
+    inference_pipe.unet = get_peft_model(inference_pipe.unet, train_pipe.unet.active_peft_config)
+
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
 
@@ -138,11 +151,11 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
 
             # Codificar imágenes en el espacio latente
             # latents = pipe.vae.encode(input_images).latent_dist.sample() * pipe.vae.config.scaling_factor
-            latents = pipe.vae.encode(input_images.to(torch.float32)).latent_dist.sample() * pipe.vae.config.scaling_factor
+            latents = train_pipe.vae.encode(input_images.to(torch.float32)).latent_dist.sample() * train_pipe.vae.config.scaling_factor
 
             # Codificar imágenes objetivo (targets) en el espacio latente
             # target_latents = pipe.vae.encode(targets).latent_dist.sample() * pipe.vae.config.scaling_factor
-            target_latents = pipe.vae.encode(targets.to(torch.float32)).latent_dist.sample() * pipe.vae.config.scaling_factor
+            target_latents = train_pipe.vae.encode(targets.to(torch.float32)).latent_dist.sample() * train_pipe.vae.config.scaling_factor
 
             # Redimensionar las máscaras al tamaño de los latentes
             masks_resized = torch.nn.functional.interpolate(input_masks, size=latents.shape[-2:])
@@ -154,7 +167,7 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
 
             # Generar ruido y añadirlo a los latentes
             batch_size = combined_inputs.shape[0]
-            timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (batch_size,), device=device).long()
+            timesteps = torch.randint(0, train_pipe.scheduler.config.num_train_timesteps, (batch_size,), device=device).long()
             noise = torch.randn_like(combined_inputs)
             noisy_inputs = combined_inputs + noise  # Añadimos el ruido
 
@@ -167,7 +180,7 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
             encoder_hidden_states = encoder_hidden_states.to(torch.float16)
 
             # Forward pass through the UNet
-            outputs = pipe.unet(noisy_inputs, timesteps, encoder_hidden_states).sample
+            outputs = train_pipe.unet(noisy_inputs, timesteps, encoder_hidden_states).sample
             outputs = outputs.to(torch.float16)
             target_latents = target_latents.to(torch.float16)
 
@@ -224,9 +237,9 @@ def main():
         test_ratio=0.15,
         seed=42)
 
-    pipe = setup_model_with_lora(MODEL_ID)
+    train_pipe = setup_model_with_lora(MODEL_ID)
 
-    train_lora(pipe, train_loader, test_loader, val_loader, num_epochs=epochs, output_dir=output_dir)
+    train_lora(train_pipe, train_loader, test_loader, val_loader, num_epochs=epochs, output_dir=output_dir)
 
     final_timestamp = datetime.now()
     print(f"Training completed. Initial timestamp: {initial_timestamp.strftime(TIMESTAMP_FORMAT)}.")
