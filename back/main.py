@@ -1,4 +1,5 @@
 import torch
+import torchvision.transforms as transforms
 from mit_semseg.utils import colorEncode
 from diffusers import StableDiffusionInpaintPipeline
 from tqdm import tqdm
@@ -8,6 +9,8 @@ from safetensors.torch import save_file
 import argparse
 from datetime import datetime
 from empty_rooms_dataset import load_dataset
+import os
+from image_service import create_epoch_image
 
 # Select GPU if available
 if not torch.cuda.is_available():
@@ -23,6 +26,7 @@ if torch.cuda.is_available():
 
 MODEL_ID = "stabilityai/stable-diffusion-2-inpainting"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
+EMPTY_ROOM_PROMPT = "A photo of an empty room with bare walls, clean floor, and no furniture or objects."
 
 # Setup LoRA Model
 def setup_model_with_lora(model_id):
@@ -32,7 +36,7 @@ def setup_model_with_lora(model_id):
     # Add autoencoder to the pipeline
     vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae").to(device)
     vae.requires_grad_(False) 
-    pipe.vae = vae
+    pipe.vae = vae.to(torch.float32)
 
     # Inspect available modules in the UNet
     supported_modules = []
@@ -58,13 +62,71 @@ def setup_model_with_lora(model_id):
 
     return pipe
 
+# Add this new function after setup_model_with_lora and before train_lora
+def save_inpaint_samples(pipe, dataloader, epoch, output_dir):
+    """Generate and save inpainted samples after each epoch"""
+
+    try:
+        # Store original state
+        pipe.unet.eval()
+
+        with torch.no_grad():
+            # Get a batch of images
+            input_images, input_masks, target_images = next(iter(dataloader))
+
+            # Process on GPU
+            input_images = input_images.to(device)
+            input_masks = input_masks.to(device)
+
+            # Denormalize images
+            input_images = ((input_images + 1) / 2).clamp(0, 1)
+            target_images = ((target_images + 1) / 2).clamp(0, 1)
+
+            max_samples = 3
+            # Only process up to 3 images from the batch
+            for idx in range(min(max_samples, input_images.size(0))):
+                # Convert input images to PIL format
+                pil_img = transforms.ToPILImage()(input_images[idx].cpu())
+                pil_mask = transforms.ToPILImage()(input_masks[idx].cpu())
+                pil_target = transforms.ToPILImage()(target_images[idx].cpu())
+
+                # Convert to float16 for inference
+                with torch.autocast(device.type):
+                    inferred_image = pipe(
+                        image=pil_img,
+                        mask_image=pil_mask,
+                        prompt=EMPTY_ROOM_PROMPT,
+                        num_inference_steps=20,
+                    ).images
+
+                create_epoch_image(input_image=pil_img, 
+                                input_mask=pil_mask,
+                                inferred_image=inferred_image[0], 
+                                target_image=pil_target,
+                                epoch=epoch, 
+                                sample_index=idx,
+                                output_path=output_dir)
+
+    except Exception as e:
+        print(f"Error during sample generation: {str(e)}")
+
+    finally:
+        # Ensure we return to training mode
+        pipe.unet.train()
+
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
 def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/data", num_epochs=5, lr=5e-5):
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    train_dir = f"{output_dir}/lora_trains/{timestamp}/"
+    os.makedirs(train_dir, exist_ok=True)
+
     optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=lr)
-    pipe.unet.train()
 
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
+
+        pipe.unet.train()
         epoch_loss = 0.0
 
         for input_images, input_masks, targets in tqdm(train_loader):
@@ -98,7 +160,7 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
 
             # Codificación del prompt vacío (sin texto)
             encoder_hidden_states = pipe.text_encoder(
-                pipe.tokenizer([""] * batch_size, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
+                pipe.tokenizer([EMPTY_ROOM_PROMPT] * batch_size, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
             )[0].to(torch.float16)
 
             noisy_inputs = noisy_inputs.to(torch.float16)
@@ -119,13 +181,18 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
 
             epoch_loss += loss.item()
 
+        pipe.unet.eval()
+        save_inpaint_samples(pipe, test_loader, epoch, train_dir)
+        pipe.unet.train()
+
         print(f"Epoch Loss: {epoch_loss / len(train_loader)}")
 
     # Save LoRA weights
     print("Training complete. Saving LoRA weights...")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     num_images = len(train_loader.dataset)
-    pipe.unet.save_pretrained(f"{output_dir}/{timestamp}_lora_weights_{num_epochs}_epochs_{num_images}_images")
+    pipe.unet.save_pretrained(f"{train_dir}_lora_weights_{num_epochs}_epochs_{num_images}_images")
+
+
 
 def read_parameters():
 
