@@ -1,4 +1,5 @@
 import torch
+import torchvision.transforms as transforms
 from mit_semseg.utils import colorEncode
 from diffusers import StableDiffusionInpaintPipeline
 from tqdm import tqdm
@@ -8,6 +9,8 @@ from safetensors.torch import save_file
 import argparse
 from datetime import datetime
 from empty_rooms_dataset import load_dataset
+import os
+from image_service import create_epoch_image
 
 # Select GPU if available
 if not torch.cuda.is_available():
@@ -23,6 +26,7 @@ if torch.cuda.is_available():
 
 MODEL_ID = "stabilityai/stable-diffusion-2-inpainting"
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
+EMPTY_ROOM_PROMPT = "A photo of an empty room with bare walls, clean floor, and no furniture or objects."
 
 # Setup LoRA Model
 def setup_model_with_lora(model_id):
@@ -58,10 +62,75 @@ def setup_model_with_lora(model_id):
 
     return pipe
 
+# Add this new function after setup_model_with_lora and before train_lora
+def save_inpaint_samples(train_pipe, inference_pipe, dataloader, epoch, output_dir):
+    """Generate and save inpainted samples after each epoch"""
+
+    try:
+        # Store original state
+        train_pipe.unet.eval()
+
+        # Load the trained weights
+        inference_pipe.unet.load_state_dict(train_pipe.unet.state_dict())
+
+        with torch.no_grad():
+            # Get a batch of images
+            input_images, input_masks, target_images = next(iter(dataloader))
+
+            # Process on GPU
+            input_images = input_images.to(device)
+            input_masks = input_masks.to(device)
+
+            # Denormalize images
+            input_images = ((input_images + 1) / 2).clamp(0, 1)
+            target_images = ((target_images + 1) / 2).clamp(0, 1)
+
+            for idx in range(input_images.size(0)):
+                # Convert input images to PIL format
+                pil_img = transforms.ToPILImage()(input_images[idx].cpu())
+                pil_mask = transforms.ToPILImage()(input_masks[idx].cpu())
+                pil_target = transforms.ToPILImage()(target_images[idx].cpu())
+
+                inferred_image = inference_pipe(
+                    image=pil_img,
+                    mask_image=pil_mask,
+                    prompt=EMPTY_ROOM_PROMPT,
+                    num_inference_steps=20,
+                ).images
+
+                create_epoch_image(input_image=pil_img, 
+                                input_mask=pil_mask,
+                                inferred_image=inferred_image[0], 
+                                target_image=pil_target,
+                                epoch=epoch, 
+                                output_path=output_dir)
+
+        # Clean up
+        del inference_pipe
+        torch.cuda.empty_cache()
+
+    except Exception as e:
+        print(f"Error during sample generation: {str(e)}")
+
+    finally:
+        # Ensure we return to training mode
+        train_pipe.unet.train()
+
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
-def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/data", num_epochs=5, lr=5e-5):
-    optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=lr)
-    pipe.unet.train()
+def train_lora(train_pipe, train_loader, test_loader, val_loader, output_dir="back/data", num_epochs=5, lr=5e-5):
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    train_dir = f"{output_dir}/lora_trains/{timestamp}/"
+    os.makedirs(train_dir, exist_ok=True)
+
+    optimizer = torch.optim.AdamW(train_pipe.unet.parameters(), lr=lr)
+    train_pipe.unet.train()
+
+    # Create inference pipeline for generating epoch-progression samples
+    inference_pipe = StableDiffusionInpaintPipeline.from_pretrained(
+        MODEL_ID, torch_dtype=torch.float16).to(device)
+
+    inference_pipe.unet = get_peft_model(inference_pipe.unet, train_pipe.unet.active_peft_config)
 
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
@@ -76,11 +145,11 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
 
             # Codificar imágenes en el espacio latente
             # latents = pipe.vae.encode(input_images).latent_dist.sample() * pipe.vae.config.scaling_factor
-            latents = pipe.vae.encode(input_images.to(torch.float32)).latent_dist.sample() * pipe.vae.config.scaling_factor
+            latents = train_pipe.vae.encode(input_images.to(torch.float32)).latent_dist.sample() * train_pipe.vae.config.scaling_factor
 
             # Codificar imágenes objetivo (targets) en el espacio latente
             # target_latents = pipe.vae.encode(targets).latent_dist.sample() * pipe.vae.config.scaling_factor
-            target_latents = pipe.vae.encode(targets.to(torch.float32)).latent_dist.sample() * pipe.vae.config.scaling_factor
+            target_latents = train_pipe.vae.encode(targets.to(torch.float32)).latent_dist.sample() * train_pipe.vae.config.scaling_factor
 
             # Redimensionar las máscaras al tamaño de los latentes
             masks_resized = torch.nn.functional.interpolate(input_masks, size=latents.shape[-2:])
@@ -92,20 +161,20 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
 
             # Generar ruido y añadirlo a los latentes
             batch_size = combined_inputs.shape[0]
-            timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (batch_size,), device=device).long()
+            timesteps = torch.randint(0, train_pipe.scheduler.config.num_train_timesteps, (batch_size,), device=device).long()
             noise = torch.randn_like(combined_inputs)
             noisy_inputs = combined_inputs + noise  # Añadimos el ruido
 
             # Codificación del prompt vacío (sin texto)
-            encoder_hidden_states = pipe.text_encoder(
-                pipe.tokenizer([""] * batch_size, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
+            encoder_hidden_states = train_pipe.text_encoder(
+                train_pipe.tokenizer([EMPTY_ROOM_PROMPT] * batch_size, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
             )[0].to(torch.float16)
 
             noisy_inputs = noisy_inputs.to(torch.float16)
             encoder_hidden_states = encoder_hidden_states.to(torch.float16)
 
             # Forward pass through the UNet
-            outputs = pipe.unet(noisy_inputs, timesteps, encoder_hidden_states).sample
+            outputs = train_pipe.unet(noisy_inputs, timesteps, encoder_hidden_states).sample
             outputs = outputs.to(torch.float16)
             target_latents = target_latents.to(torch.float16)
 
@@ -119,13 +188,16 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
 
             epoch_loss += loss.item()
 
+        save_inpaint_samples(train_pipe, inference_pipe, test_loader, epoch, train_dir)
+
         print(f"Epoch Loss: {epoch_loss / len(train_loader)}")
 
     # Save LoRA weights
     print("Training complete. Saving LoRA weights...")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     num_images = len(train_loader.dataset)
-    pipe.unet.save_pretrained(f"{output_dir}/{timestamp}_lora_weights_{num_epochs}_epochs_{num_images}_images")
+    train_pipe.unet.save_pretrained(f"{train_dir}_lora_weights_{num_epochs}_epochs_{num_images}_images")
+
+
 
 def read_parameters():
 
@@ -157,9 +229,9 @@ def main():
         test_ratio=0.15,
         seed=42)
 
-    pipe = setup_model_with_lora(MODEL_ID)
+    train_pipe = setup_model_with_lora(MODEL_ID)
 
-    train_lora(pipe, train_loader, test_loader, val_loader, num_epochs=epochs, output_dir=output_dir)
+    train_lora(train_pipe, train_loader, test_loader, val_loader, num_epochs=epochs, output_dir=output_dir)
 
     final_timestamp = datetime.now()
     print(f"Training completed. Initial timestamp: {initial_timestamp.strftime(TIMESTAMP_FORMAT)}.")
