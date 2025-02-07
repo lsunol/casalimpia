@@ -125,7 +125,6 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
     optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=lr)
     pipe.unet.train()
 
-    # Create inference pipeline for generating epoch-progression samples
     inference_pipe = StableDiffusionInpaintPipeline.from_pretrained(
         MODEL_ID, torch_dtype=torch.float16).to(device)
 
