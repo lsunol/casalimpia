@@ -2,7 +2,9 @@ import os
 import torch
 import torch.utils
 import torchvision.transforms as transforms
+import PIL
 from PIL import Image
+import numpy
 
 # Define the InpaintingDataset class within the module
 class InpaintingDataset(torch.utils.data.Dataset):
@@ -22,18 +24,38 @@ class InpaintingDataset(torch.utils.data.Dataset):
         return len(self.input_files)
 
     def __getitem__(self, idx):
-
+        """
+        Get an item from the dataset by index.
+        This method retrieves an image pair and a random mask from the directory. 
+        It loads the input image, applies the random mask, and returns
+        the masked image along with the original mask and input image.
+        Args:
+            idx (int): Index to retrieve the item from dataset.
+        Returns:
+            tuple: A tuple containing:
+                - masked_image (torch.Tensor): The input image merged with the mask
+                - mask (torch.Tensor): The binary mask applied to the image
+                - target_image (torch.Tensor): The original unmasked input image 
+        Notes:
+            - Input images are loaded as RGB
+            - Masks are loaded as grayscale (L mode)
+            - Both images and masks are transformed according to the dataset's transform parameters
+            - Masks are cycled through using modulo operation if there are fewer masks than images
+        """
+        # Load input image
         input_path = os.path.join(self.inputs_dir, self.input_files[idx])
         input_image = Image.open(input_path).convert("RGB")
         input_image = self.image_transforms(input_image)
 
         # Pick one random mask file from directory
-        mask_path = os.path.join(self.masks_dir, self.mask_files[idx % self.length_masks])
-        mask_image = Image.open(mask_path).convert("L")
-        mask_image = self.masks_transforms(mask_image)
+        random_mask_idx = torch.randint(0, self.length_masks, (1,)).item()
+        mask_path = os.path.join(self.masks_dir, self.mask_files[random_mask_idx])
+        mask = Image.open(mask_path).convert("L")
+        mask = self.masks_transforms(mask)
 
-        # target_image is still the same as input_image
-        return input_image, mask_image, input_image 
+        masked_image = merge_image_with_mask(input_image, mask)
+
+        return masked_image, mask, input_image 
 
 # Load Dataset: prepara DataLoader para el batch training. INPUT are resized to (3, img_size, img_size)
 def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
@@ -41,13 +63,15 @@ def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, train_ratio=
     assert abs((train_ratio + val_ratio + test_ratio) - 1) < 1e-5, "The sum of train_ratio, val_ratio, and test_ratio must be equal to 1."
 
     images_transforms = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
+        transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.RandomCrop(img_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
 
     masks_transforms = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
+        transforms.Resize(img_size),
+        transforms.RandomCrop(img_size),
         transforms.ToTensor()
     ])
 
@@ -76,35 +100,22 @@ def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, train_ratio=
 
     return train_loader, val_loader, test_loader
 
-# Merge Inputs and Masks: combina img de habitación vacia con mascara y salva el conjunto en "output_dir"
-# def merge_inputs_and_masks(empty_rooms_dir, masks_dir, output_dir):
-#     os.makedirs(output_dir, exist_ok=True)
+# Merge Inputs and Masks: combina img de habitación vacia con mascara de habitación vacia
+def merge_image_with_mask(input_image, mask_image):
+    # Convert tensors to numpy arrays for manipulation
+    input_image = input_image.cpu().detach().numpy().transpose(1, 2, 0)
+    mask_image = mask_image.cpu().detach().numpy().transpose(1, 2, 0)
+    
+    # Convert to [0, 255] range
+    output_image = ((input_image + 1) * 127.5).astype(numpy.uint8)
+    
+    # Apply mask
+    output_image[mask_image.squeeze() > 0] = 0
+    
+    # Convert back to tensor in range [-1, 1]
+    output_tensor = torch.from_numpy(output_image).permute(2, 0, 1).float() / 127.5 - 1
 
-#     empty_room_files = sorted(os.listdir(empty_rooms_dir))
-#     mask_files = sorted(os.listdir(masks_dir))
-
-#     for room_file, mask_file in zip(empty_room_files, mask_files):
-#         room_path = os.path.join(empty_rooms_dir, room_file)
-#         mask_path = os.path.join(masks_dir, mask_file)
-
-#         empty_room = Image.open(room_path).convert("RGB")
-#         mask_data = numpy.load(mask_path)
-#         mask = numpy.any(mask_data["masks"], axis=0) if len(mask_data["masks"].shape) == 3 else mask_data["masks"]      # Combine masks
-#         mask_image = Image.fromarray((mask * 255).astype(numpy.uint8)).convert("L")
-
-#         # Resize mask to match the room size
-#         mask_image = mask_image.resize(empty_room.size, Image.Resampling.NEAREST)
-
-#         # Combine room and mask
-#         mask_overlay = Image.new("RGB", empty_room.size)                                        # Create an overlay
-#         mask_overlay.paste(empty_room, (0, 0))                                                  # Paste the empty room image
-#         red_layer = Image.new("RGB", empty_room.size, (255, 0, 0))                              # Red overlay for the mask
-#         black_layer = Image.new("RGB", empty_room.size, (0, 0, 0))                              # Red overlay for the mask
-#         mask_overlay.paste(black_layer, (0, 0), mask_image)                                     # Add the mask as a red overlay
-#         mask_overlay = Image.blend(empty_room, mask_overlay, alpha=1.0)                         # Blend the overlay with the room image
-
-#         # Save merged input
-#         output_path = os.path.join(output_dir, room_file)
-#         mask_overlay.save(output_path)
-#         print(f"Saved merged input: {output_path}")
-
+    from image_service import save_image
+    save_image(output_tensor, "C:/temp/masked-image.png")
+    
+    return output_tensor
