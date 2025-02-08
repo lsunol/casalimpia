@@ -1,3 +1,5 @@
+import torch
+import PIL
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import os
@@ -34,22 +36,13 @@ def create_epoch_image(input_image, input_mask, inferred_image, target_image, ep
     _, _, text_width, text_height = font.getbbox(text)
     draw.text((image_margin, (title_height - text_height) // 2), text, font=font, fill="black")
 
-    # Superponer la máscara en negro sobre la imagen original
-    input_with_mask = input_image.copy()
-    mask_array = np.array(input_mask)  # Convertir la máscara a un array de numpy
-    input_with_mask_array = np.array(input_with_mask)  # Convertir la imagen original a un array de numpy
-
-    # Aplicar la máscara (píxeles negros donde la máscara es 1)
-    input_with_mask_array[mask_array == 255] = [0, 0, 0]  # Negro puro
-    input_with_mask = Image.fromarray(input_with_mask_array)  # Convertir de nuevo a PIL.Image
-
     # Crear una imagen compuesta con las 3 columnas
     composite_width = img_width * 3 + image_margin * 4
     composite_height = img_height + image_margin
     composite_image = Image.new("RGB", (composite_width, composite_height), color="white")
 
     # Pegar las imágenes en la imagen compuesta
-    composite_image.paste(input_with_mask.convert("RGB"), (image_margin, 0))  # Columna 1: Imagen original con máscara
+    composite_image.paste(input_image.convert("RGB"), (image_margin, 0))  # Columna 1: Imagen original con máscara
     composite_image.paste(inferred_image.convert("RGB"), (img_width + image_margin * 2, 0))  # Columna 2: Imagen inferida
     composite_image.paste(target_image.convert("RGB"), (img_width * 2 + image_margin * 3, 0))  # Columna 3: Imagen target
 
@@ -75,6 +68,14 @@ def create_epoch_image(input_image, input_mask, inferred_image, target_image, ep
     else:
         # Save new image if no existing file
         final_image.save(image_path)
+
+def save_image(image, path):
+    if isinstance(image, torch.Tensor):
+        image = image.cpu().detach().numpy().transpose(1, 2, 0)
+    elif isinstance(image, PIL.Image.Image):
+        image = np.array(image)
+    image = ((image + 1) * 127.5).astype(np.uint8)
+    Image.fromarray(image).save(path)
 
 if __name__ == "__main__":
 

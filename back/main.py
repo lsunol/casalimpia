@@ -24,19 +24,27 @@ if torch.cuda.is_available():
     torch.backends.cuda.enable_mem_efficient_sdp(True)
     torch.backends.cuda.enable_math_sdp(True)
 
-MODEL_ID = "stabilityai/stable-diffusion-2-inpainting"
+MODELS = {
+    "stability-ai": "stabilityai/stable-diffusion-2-inpainting", 
+    "runway": "runwayml/stable-diffusion-inpainting"
+    }
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 EMPTY_ROOM_PROMPT = "A photo of an empty room with bare walls, clean floor, and no furniture or objects."
 
 # Setup LoRA Model
 def setup_model_with_lora(model_id):
 
-    pipe = StableDiffusionInpaintPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
+    pipe = StableDiffusionInpaintPipeline.from_pretrained(
+        model_id, torch_dtype=torch.float16, safety_checker=None).to(device)
+    pipe.set_progress_bar_config(disable=True)
 
     # Add autoencoder to the pipeline
     vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae").to(device)
-    vae.requires_grad_(False) 
     pipe.vae = vae.to(torch.float32)
+    # TODO: revisar
+    vae.requires_grad_(False) 
+    pipe.text_encoder.requires_grad_(False)
+    pipe.unet.requires_grad_(False)
 
     # Inspect available modules in the UNet
     supported_modules = []
@@ -122,13 +130,9 @@ def train_lora(pipe, train_loader, test_loader, val_loader, output_dir="back/dat
     train_dir = f"{output_dir}/lora_trains/{timestamp}_{num_epochs}_epochs_{num_images}_images/"
     os.makedirs(train_dir, exist_ok=True)
 
+    # TODO: passar parámetres de LoRA només?
     optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=lr)
     pipe.unet.train()
-
-    inference_pipe = StableDiffusionInpaintPipeline.from_pretrained(
-        MODEL_ID, torch_dtype=torch.float16).to(device)
-
-    inference_pipe.unet = get_peft_model(inference_pipe.unet, pipe.unet.active_peft_config)
 
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
@@ -208,17 +212,18 @@ def read_parameters():
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs for training")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size for training")
     parser.add_argument("--output-dir", type=str, default="./data/trained_lora", help="Output directory for saving LoRA weights")
+    parser.add_argument("--model", type=str, choices=["stability-ai", "runway"], default="stability-ai", help="Model to use: \"stability-ai\" (default) or \"runway\"")
 
     args = parser.parse_args()
 
-    return args.empty_rooms_dir, args.masks_dir, args.epochs, args.batch_size, args.output_dir
+    return args.empty_rooms_dir, args.masks_dir, args.epochs, args.batch_size, args.output_dir, args.model
 
 # Main Function
 def main():
     
     initial_timestamp = datetime.now()
 
-    empty_rooms_dir, masks_dir, epochs, batch_size, output_dir = read_parameters()
+    empty_rooms_dir, masks_dir, epochs, batch_size, output_dir, model_id = read_parameters()
 
     train_loader, val_loader, test_loader = load_dataset(
         inputs_dir=empty_rooms_dir, 
@@ -230,7 +235,7 @@ def main():
         test_ratio=0.15,
         seed=42)
 
-    pipe = setup_model_with_lora(MODEL_ID)
+    pipe = setup_model_with_lora(MODELS[model_id])
 
     train_lora(pipe, train_loader, test_loader, val_loader, num_epochs=epochs, output_dir=output_dir)
 
