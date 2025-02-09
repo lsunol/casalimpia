@@ -179,12 +179,12 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
             # Codificar imágenes en el espacio latente
             # latents = pipe.vae.encode(input_images).latent_dist.sample() * pipe.vae.config.scaling_factor
-            latents = vae.encode(targets.to(torch.float32)).latent_dist.sample() * pipe.vae.config.scaling_factor
+            latents = vae.encode(targets.to(torch.float16)).latent_dist.sample() * pipe.vae.config.scaling_factor
 
             masked_latents = vae.encode(input_images).latent_dist.sample() * pipe.vae.config.scaling_factor
 
             mask = torch.stack(
-                [torch.nn.functional.interpolate(mask, size=(img_size // 8, img_size // 8)) for mask in input_masks]
+                [torch.nn.functional.interpolate(mask.unsqueeze(0), size=(img_size // 8, img_size // 8)) for mask in input_masks]
             ).to(torch.float16)
             mask = mask.reshape(-1, 1, img_size // 8, img_size // 8)
 
@@ -206,7 +206,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
             # Codificación del prompt 
             encoder_hidden_states = pipe.text_encoder(
-                pipe.tokenizer([EMPTY_ROOM_PROMPT] * batch_size, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
+                pipe.tokenizer([EMPTY_ROOM_PROMPT] * bsz, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
             )[0].to(torch.float16)
 
             # Predict the noise residual
