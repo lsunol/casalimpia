@@ -229,7 +229,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
             epoch_loss += loss.item()
 
         pipe.unet.eval()
-        save_inpaint_samples(pipe, test_loader, epoch, train_dir)
+        if (epoch + 1) % max(1, num_epochs // 10) == 0:
+            save_inpaint_samples(pipe, test_loader, epoch, train_dir)
         pipe.unet.train()
 
         print(f"Epoch Loss: {epoch_loss / len(train_loader)}")
