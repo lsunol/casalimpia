@@ -145,55 +145,24 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
     vae.to(device, dtype=torch.float16)
     text_encoder.to(device, dtype=torch.float16)
 
-    import diffusers
-    print("diffusers version: ", diffusers.__version__)
-    # Set correct lora layers
-    lora_attn_procs = {}
-    for name in unet.attn_processors.keys():
-        cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
-        if name.startswith("mid_block"):
-            hidden_size = unet.config.block_out_channels[-1]
-        elif name.startswith("up_blocks"):
-            block_id = int(name[len("up_blocks.")])
-            hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
-        elif name.startswith("down_blocks"):
-            block_id = int(name[len("down_blocks.")])
-            hidden_size = unet.config.block_out_channels[block_id]
+    
+    unet_lora_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        init_lora_weights="gaussian",
+        lora_dropout=0.1,
+    )
 
-        lora_attn_procs[name] = LoRAAttnProcessor(
-            hidden_size=hidden_size, 
-            cross_attention_dim=cross_attention_dim
-            )
-
-    unet.set_attn_processor(lora_attn_procs)
-    lora_layers = AttnProcsLayers(unet.attn_processors)
+    unet.add_adapter(unet_lora_config)
+    lora_layers = filter(lambda p: p.requires_grad, unet.parameters())
 
     optimizer = torch.optim.AdamW(
-        lora_layers.parameters(),
+        lora_layers,
         lr=5e-5
     )
 
     noise_scheduler = DDPMScheduler.from_pretrained(model_id, subfolder="scheduler")    
-
-    # Set correct lora layers
-    lora_attn_procs = {}
-    for name in unet.attn_processors.keys():
-        cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
-        if name.startswith("mid_block"):
-            hidden_size = unet.config.block_out_channels[-1]
-        elif name.startswith("up_blocks"):
-            block_id = int(name[len("up_blocks.")])
-            hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
-        elif name.startswith("down_blocks"):
-            block_id = int(name[len("down_blocks.")])
-            hidden_size = unet.config.block_out_channels[block_id]
-
-        lora_attn_procs[name] = LoRAAttnProcessor(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim)
-
-    unet.set_attn_processor(lora_attn_procs)
-    lora_layers = AttnProcsLayers(pipe.unet.attn_processors)
-    optimizer = torch.optim.AdamW(lora_layers.parameters(), lr=lr)
-
 
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
