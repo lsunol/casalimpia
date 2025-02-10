@@ -145,7 +145,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
     vae.to(device, dtype=torch.float16)
     text_encoder.to(device, dtype=torch.float16)
 
-    
     unet_lora_config = LoraConfig(
         r=16,
         lora_alpha=32,
@@ -155,6 +154,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
     )
 
     unet.add_adapter(unet_lora_config)
+    pipe.unet = unet
+
     lora_layers = filter(lambda p: p.requires_grad, unet.parameters())
 
     optimizer = torch.optim.AdamW(
@@ -228,17 +229,19 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
             epoch_loss += loss.item()
 
-        pipe.unet.eval()
+        unet.eval()
         if (epoch + 1) % max(1, num_epochs // 10) == 0:
             save_inpaint_samples(pipe, test_loader, epoch, train_dir)
-        pipe.unet.train()
+        unet.train()
 
         print(f"Epoch Loss: {epoch_loss / len(train_loader)}")
 
     # Save LoRA weights
-    print("Training complete. Saving LoRA weights...")
-    pipe.unet.save_pretrained(f"{train_dir}_lora_weights")
+    # Verifica que el modelo tiene LoRA configurado antes de guardar
+    assert hasattr(unet, "peft_config"), "El modelo UNet no tiene configurado LoRA."
 
+    print("Training complete. Saving LoRA weights...")
+    unet.save_attn_procs(f"{train_dir}_lora_weights", unet_lora_layers=pipe.unet.attn_processors)
 
 
 def read_parameters():
