@@ -4,7 +4,7 @@ from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import os
 
-def create_epoch_image(input_image, input_mask, inferred_image, target_image, epoch, sample_index, output_path):
+def save_epoch_sample(input_image, input_mask, inferred_image, target_image, epoch, sample_index, output_path):
     """
     Crea una imagen con un título y concatena las imágenes proporcionadas.
 
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     output_path = "back/data/lora_trains/image_sandbox/"
 
     # Llamar al método para crear y guardar la imagen
-    create_epoch_image(
+    save_epoch_sample(
         input_image=input_image,
         input_mask=input_mask,
         inferred_image=inferred_image,
@@ -128,7 +128,7 @@ if __name__ == "__main__":
     )
 
     # Llamar al método para crear y guardar la imagen
-    create_epoch_image(
+    save_epoch_sample(
         input_image=input_image,
         input_mask=input_mask,
         inferred_image=inferred_image,
