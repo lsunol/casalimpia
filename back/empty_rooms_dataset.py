@@ -109,8 +109,11 @@ def merge_image_with_mask(input_image, mask_image):
     # Convert to [0, 255] range
     output_image = ((input_image + 1) * 127.5).astype(numpy.uint8)
     
-    # Apply mask
-    output_image[mask_image.squeeze() > 0] = 0
+    # Apply red mask (R=255, G=0, B=0)
+    mask = mask_image.squeeze() > 0
+    output_image[mask, 0] = 255  # Red channel
+    output_image[mask, 1] = 0    # Green channel
+    output_image[mask, 2] = 0    # Blue channel
     
     # Convert back to tensor in range [-1, 1]
     output_tensor = torch.from_numpy(output_image).permute(2, 0, 1).float() / 127.5 - 1
