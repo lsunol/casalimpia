@@ -1,6 +1,7 @@
 # Librerías estándar de Python
 import argparse
 import os
+import json
 from datetime import datetime
 import hashlib as insecure_hashlib  # Renombrado para evitar conflictos
 
@@ -122,7 +123,7 @@ def save_inpaint_samples(pipe, dataloader, epoch, output_dir):
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
 def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back/data", 
                num_epochs=5, lr=1e-5, img_size=512, dtype="float32", 
-               salve_latent_representations=False):
+               save_latent_representations=False, lora_rank=16, lora_alpha=32):
 
     torch_dtype = torch.float32 if dtype == "float32" else torch.float16
 
@@ -130,7 +131,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
     num_images = len(train_loader.dataset)
     train_dir = f"{output_dir}/lora_trains/{timestamp}_{num_epochs}_epochs_{num_images}_images/"
     os.makedirs(train_dir, exist_ok=True)
- 
+
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
         model_id, torch_dtype=torch_dtype, safety_checker=None).to(device)
     pipe.set_progress_bar_config(disable=True)
@@ -149,13 +150,33 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
     vae.to(device, dtype=torch_dtype)
     text_encoder.to(device, dtype=torch_dtype)
 
+    lora_target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
+    lora_dropout = 0.1
     unet_lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        r=lora_rank,
+        lora_alpha=lora_alpha,
+        target_modules=lora_target_modules,
         init_lora_weights="gaussian",
-        lora_dropout=0.1,
+        lora_dropout=lora_dropout,
     )
+ 
+    config_used = {
+        "model_id": model_id,
+        "num_epochs": num_epochs,
+        "num_images": num_images,
+        "lr": lr,
+        "img_size": img_size,
+        "dtype": dtype,
+        "lora_rank": lora_rank,
+        "lora_alpha": lora_alpha,
+        "lora_target_modules": lora_target_modules,
+        "lora_dropout": lora_dropout,
+        "save_latent_representations": save_latent_representations,
+        "num_images": num_images,
+        "timestamp": timestamp
+    }
+    with (open(f"{train_dir}config_used.json", "w")) as file:
+        json.dump(config_used, file, indent=4)
 
     unet.add_adapter(unet_lora_config)
     pipe.unet = unet
@@ -221,7 +242,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
                 save_inpaint_samples(pipe, test_loader, -1, train_dir)
                 first_time_ever = False
 
-                if salve_latent_representations:
+                if save_latent_representations:
                     # just to print latents and masked_latents
                     from image_service import save_image
                     to_pil = transforms.ToPILImage()
@@ -351,7 +372,7 @@ def main():
                lr=1e-5, 
                output_dir=output_dir, 
                img_size=img_size, 
-               salve_latent_representations=save_latent_representations,
+               save_latent_representations=save_latent_representations,
                dtype=dtype)
 
     final_timestamp = datetime.now()
