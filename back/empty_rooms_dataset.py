@@ -4,12 +4,15 @@ import torch.utils
 import torchvision.transforms as transforms
 import PIL
 from PIL import Image
-import numpy
+import numpy 
+from scipy.ndimage import binary_dilation
+
 
 # Define the InpaintingDataset class within the module
 class InpaintingDataset(torch.utils.data.Dataset):
 
-    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms):
+    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms, mask_padding):
+        
         self.inputs_dir = inputs_dir
         self.masks_dir = masks_dir
         self.input_files = sorted(os.listdir(inputs_dir))
@@ -19,6 +22,7 @@ class InpaintingDataset(torch.utils.data.Dataset):
         self.mask_files = sorted(os.listdir(self.masks_dir))
         self.length_masks = len(self.mask_files)
         print("Number of masks:", self.length_masks)
+        self.mask_padding = mask_padding
 
     def __len__(self):
         return len(self.input_files)
@@ -55,10 +59,10 @@ class InpaintingDataset(torch.utils.data.Dataset):
 
         masked_image = merge_image_with_mask(input_image, mask)
 
-        return masked_image, mask, input_image 
+        return masked_image, add_padding_to_mask(mask, self.mask_padding), input_image, mask 
 
 # Load Dataset: prepara DataLoader para el batch training. INPUT are resized to (3, img_size, img_size)
-def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
+def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, mask_padding=10, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
 
     assert abs((train_ratio + val_ratio + test_ratio) - 1) < 1e-5, "The sum of train_ratio, val_ratio, and test_ratio must be equal to 1."
 
@@ -78,6 +82,7 @@ def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, train_ratio=
     full_dataset = InpaintingDataset(
         inputs_dir=inputs_dir,
         masks_dir=masks_dir,
+        mask_padding=mask_padding,
         image_transforms=images_transforms,
         masks_transforms=masks_transforms
     )
@@ -118,7 +123,76 @@ def merge_image_with_mask(input_image, mask_image):
     # Convert back to tensor in range [-1, 1]
     output_tensor = torch.from_numpy(output_image).permute(2, 0, 1).float() / 127.5 - 1
 
-    from image_service import save_image
-    save_image(output_tensor, "C:/temp/masked-image.png")
-    
     return output_tensor
+
+def add_padding_to_mask(mask, num_pixels=5):
+    """
+    Expande la región enmascarada en una máscara binaria.
+
+    Args:
+        mask (torch.Tensor): Máscara en formato tensor, valores en [0,1], tamaño (1, H, W).
+        num_pixels (int): Número de píxeles a expandir la máscara.
+
+    Returns:
+        torch.Tensor: Máscara con padding aplicado.
+    """
+    if not isinstance(mask, torch.Tensor):
+        raise TypeError("La máscara debe ser un tensor de PyTorch.")
+    
+    # Convertir el tensor de PyTorch a numpy
+    mask_np = mask.squeeze(0).cpu().numpy()  # (H, W)
+
+    # Asegurar que es una máscara binaria
+    mask_np = (mask_np > 0.5).astype(numpy.uint8)
+
+    # Aplicar dilatación morfológica para expandir la máscara
+    structuring_element = numpy.ones((num_pixels * 2 + 1, num_pixels * 2 + 1), dtype=numpy.uint8)
+    expanded_mask_np = binary_dilation(mask_np, structure=structuring_element).astype(numpy.float32)
+
+    # Convertir de nuevo a tensor y mantener el formato (1, H, W)
+    expanded_mask = torch.from_numpy(expanded_mask_np).unsqueeze(0)
+
+    return expanded_mask
+
+def save_tensor_as_grayscale_png(tensor, output_path):
+    """
+    Guarda un tensor de tamaño 1x512x512 (o cualquier tensor 2D/3D con un solo canal)
+    como una imagen PNG en escala de grises. Util para guardar máscaras.
+    
+    Args:
+        tensor (torch.Tensor): Tensor de entrada, debe ser de forma [1, H, W] o [H, W]
+        output_path (str): Ruta donde se guardará la imagen PNG
+    
+    Returns:
+        None
+    """
+    # Asegurarse de que el tensor esté en CPU
+    if tensor.is_cuda:
+        tensor = tensor.cpu()
+    
+    # Manejar diferentes formas de tensor
+    if tensor.dim() == 3 and tensor.size(0) == 1:
+        # Si es [1, H, W], quitar la primera dimensión
+        tensor = tensor.squeeze(0)
+    elif tensor.dim() != 2:
+        raise ValueError(f"El tensor debe ser de forma [1, H, W] o [H, W], pero tiene forma {tensor.shape}")
+    
+    # Convertir a NumPy
+    numpy_array = tensor.detach().numpy()
+    
+    # Normalizar a rango [0, 255]
+    min_val = numpy_array.min()
+    max_val = numpy_array.max()
+    if min_val != max_val:  # Evitar división por cero
+        numpy_array = ((numpy_array - min_val) / (max_val - min_val) * 255).astype(numpy.uint8)
+    else:
+        numpy_array = numpy.zeros_like(numpy_array, dtype=numpy.uint8)
+    
+    # Crear una imagen PIL
+    img = Image.fromarray(numpy_array, mode='L')  # 'L' indica modo escala de grises
+    
+    # Asegurarse de que el directorio existe
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # Guardar la imagen
+    img.save(output_path)
