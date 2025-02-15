@@ -198,12 +198,13 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
         unet.train()
         epoch_loss = 0.0
 
-        for input_images, input_masks, targets in tqdm(train_loader):
+        for input_images, input_masks, targets, unpadded_masks in tqdm(train_loader):
 
             # Move to device
             input_images = input_images.to(device).to(torch_dtype)
             input_masks = input_masks.to(device).to(torch_dtype)
             targets = targets.to(device).to(torch_dtype)
+            unpadded_masks = unpadded_masks.to(device).to(torch_dtype)
 
             # code based in train_dreambooth_inpaint_lora.py
             # https://github.com/huggingface/diffusers/blob/main/examples/research_projects/dreambooth_inpaint/train_dreambooth_inpaint_lora.py
@@ -249,6 +250,9 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
                     normalized_input_images = (input_images / 2 + 0.5).clamp(0, 1)
                     normalized_targets = (targets / 2 + 0.5).clamp(0, 1)
                     normalized_masks = (input_masks / 2 + 0.5).clamp(0, 1)
+                    normalized_unpadded_masks = (unpadded_masks / 2 + 0.5).clamp(0, 1)
+                    normalized_masks = normalized_masks.repeat(1, 3, 1, 1)  # Convert from 1 to 3 channels
+                    normalized_unpadded_masks = normalized_unpadded_masks.repeat(1, 3, 1, 1)  # Convert from 1 to 3 channels
 
                     decoded_target_latents = vae.decode(target_latents)
                     decoded_target_latents = (decoded_target_latents.sample / 2 + 0.5).clamp(0, 1)
@@ -256,10 +260,12 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
                     decoded_masked_latents = (decoded_masked_latents.sample / 2 + 0.5).clamp(0, 1)
 
                     for i in range(decoded_target_latents.shape[0]):
-                        img1 = (torch.cat((normalized_targets[i], decoded_target_latents[i]), dim=2))
-                        img2 = (torch.cat((normalized_input_images[i], decoded_masked_latents[i]), dim=2))
-                        img = to_pil(torch.cat((img1, img2), dim=1))
-                        img.save(f"{train_dir}sample_{i}_decoded_target_latents.png")
+                        original_image_comparison = (torch.cat((normalized_targets[i], decoded_target_latents[i]), dim=2))
+                        masked_image_comparison = (torch.cat((normalized_input_images[i], decoded_masked_latents[i]), dim=2))                        
+                        unpadded_padded_mask_comparison = (torch.cat((normalized_unpadded_masks[i], normalized_masks[i]), dim=2))
+
+                        final_img = to_pil(torch.cat((original_image_comparison, masked_image_comparison, unpadded_padded_mask_comparison), dim=1))
+                        final_img.save(f"{train_dir}sample_{i}_decoded_target_latents.png")
 
             with autocast(enabled=(dtype == "float16")):
                 # Predict the noise residual
@@ -356,6 +362,7 @@ def main():
         inputs_dir=empty_rooms_dir, 
         masks_dir=masks_dir, 
         batch_size=batch_size, 
+        mask_padding=10,
         img_size=img_size,
         train_ratio=0.7,
         val_ratio=0.15,
