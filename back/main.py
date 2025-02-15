@@ -336,51 +336,46 @@ def read_parameters():
     parser.add_argument("--model", type=str, choices=["stability-ai", "runway"], default="stability-ai", help="Model to use: \"stability-ai\" (default) or \"runway\"")
     parser.add_argument("--img-size", type=int, default=512, help="Image size for training")
     parser.add_argument("--save-latent-representations", action="store_true", help="Save latent representations during training")
-    parser.add_argument("--dtype", type=str, choices=["float16", "float32"], 
-                       default="float32", help="Data type for training: float16 or float32")
+    parser.add_argument("--dtype", type=str, choices=["float16", "float32"], default="float32", help="Data type for training: float16 or float32")
+    parser.add_argument("--lora-rank", type=int, default=64, help="Rank for LoRA layers")
+    parser.add_argument("--lora-alpha", type=int, default=128, help="Alpha scaling factor for LoRA layers")
     
     args = parser.parse_args()
 
-    return (args.empty_rooms_dir, 
-            args.masks_dir, 
-            args.epochs,
-            args.batch_size, 
-            args.output_dir, 
-            args.model, 
-            args.img_size, 
-            args.save_latent_representations,
-            args.dtype)
+    return args
 
 # Main Function
 def main():
     
     initial_timestamp = datetime.now()
 
-    empty_rooms_dir, masks_dir, epochs, batch_size, output_dir, model_id_parameter, img_size, save_latent_representations, dtype = read_parameters()
+    args = read_parameters()
 
     train_loader, val_loader, test_loader = load_dataset(
-        inputs_dir=empty_rooms_dir, 
-        masks_dir=masks_dir, 
-        batch_size=batch_size, 
+        inputs_dir=args.empty_rooms_dir, 
+        masks_dir=args.masks_dir, 
+        batch_size=args.batch_size, 
         mask_padding=10,
-        img_size=img_size,
+        img_size=args.img_size,
         train_ratio=0.7,
         val_ratio=0.15,
         test_ratio=0.15,
         seed=42)
 
-    model_id = MODELS[model_id_parameter]
+    model_id = MODELS[args.model]
 
     train_lora(model_id, 
                train_loader, 
                test_loader, 
                val_loader, 
-               num_epochs=epochs,
+               num_epochs=args.epochs,
                lr=1e-5, 
-               output_dir=output_dir, 
-               img_size=img_size, 
-               save_latent_representations=save_latent_representations,
-               dtype=dtype)
+               output_dir=args.output_dir, 
+               img_size=args.img_size, 
+               save_latent_representations=args.save_latent_representations,
+               lora_rank=args.lora_rank,
+               lora_alpha=args.lora_alpha,
+               dtype=args.dtype)
 
     final_timestamp = datetime.now()
     print(f"Training completed. Initial timestamp: {initial_timestamp.strftime(TIMESTAMP_FORMAT)}.")
