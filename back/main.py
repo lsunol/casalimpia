@@ -79,7 +79,7 @@ def save_inpaint_samples(pipe, dataloader, epoch, output_dir):
 
         with torch.no_grad():
             # Get a batch of images
-            input_images, input_masks, target_images = next(iter(dataloader))
+            input_images, input_masks, target_images, unpadded_masks = next(iter(dataloader))
 
             # Process on GPU
             input_images = input_images.to(device)
