@@ -3,48 +3,39 @@ import argparse
 import os
 import json
 from datetime import datetime
-import hashlib as insecure_hashlib  # Renombrado para evitar conflictos
 
 # Manipulación de imágenes y datos
 import numpy as np
-from PIL import Image, ImageDraw
 
 # PyTorch y torchvision
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from torch.utils.data import Dataset
 from torchvision import transforms
 
 # Hugging Face y Diffusers
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionInpaintPipeline, UNet2DConditionModel
-from diffusers.models.attention_processor import LoRAAttnProcessor
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_xformers_available
-from diffusers.loaders import AttnProcsLayers
 
 # Transformers (Hugging Face)
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel
 
 # PEFT (Parameter-Efficient Fine-Tuning)
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig
 
 # Hugging Face Hub
 from huggingface_hub import create_repo, upload_folder
 
 # Progreso y logging
 from tqdm import tqdm
-from tqdm.auto import tqdm as auto_tqdm
 
 # Módulos personalizados
 from empty_rooms_dataset import load_dataset
 from image_service import save_epoch_sample
 
-# Otras utilidades
-from mit_semseg.utils import colorEncode
-from safetensors.torch import save_file
-
 from torch.cuda.amp import GradScaler, autocast
+from metrics import calculate_psnr
 
 # Select GPU if available
 if not torch.cuda.is_available():
@@ -70,7 +61,7 @@ EMPTY_ROOM_PROMPT = [
 ]
 
 # Add this new function after setup_model_with_lora and before train_lora
-def save_inpaint_samples(pipe, dataloader, epoch, output_dir):
+def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir):
     """Generate and save inpainted samples after each epoch"""
 
     try:
@@ -78,40 +69,46 @@ def save_inpaint_samples(pipe, dataloader, epoch, output_dir):
         pipe.unet.eval()
 
         with torch.no_grad():
-            # Get a batch of images
-            input_images, input_masks, target_images, unpadded_masks = next(iter(dataloader))
 
-            # Process on GPU
-            input_images = input_images.to(device)
-            input_masks = input_masks.to(device)
+            psnr_values = []
 
-            # Denormalize images
-            input_images = ((input_images + 1) / 2).clamp(0, 1)
-            target_images = ((target_images + 1) / 2).clamp(0, 1)
+            for input_images, input_masks, target_images, _ in dataloader:
 
-            max_samples = 3
-            # Only process up to 3 images from the batch
-            for idx in range(min(max_samples, input_images.size(0))):
-                # Convert input images to PIL format
-                pil_img = transforms.ToPILImage()(input_images[idx].cpu())
-                pil_mask = transforms.ToPILImage()(input_masks[idx].cpu())
-                pil_target = transforms.ToPILImage()(target_images[idx].cpu())
+                # Process on GPU
+                input_images = input_images.to(device)
+                input_masks = input_masks.to(device)
 
-                with torch.autocast(device.type):
-                    inferred_image = pipe(
-                        image=pil_img,
-                        mask_image=pil_mask,
-                        prompt=EMPTY_ROOM_PROMPT,
-                        num_inference_steps=20,
-                    ).images
+                # Denormalize images
+                input_images = ((input_images + 1) / 2).clamp(0, 1)
+                target_images = ((target_images + 1) / 2).clamp(0, 1)
 
-                save_epoch_sample(input_image=pil_img, 
-                                input_mask=pil_mask,
-                                inferred_image=inferred_image[0], 
-                                target_image=pil_target,
-                                epoch=epoch, 
-                                sample_index=idx,
-                                output_path=output_dir)
+                for idx in range(input_images.size(0)):
+
+                    with torch.autocast(device.type):
+                        inferred_image = pipe(
+                            image=input_images[idx],
+                            mask_image=input_masks[idx],
+                            prompt=EMPTY_ROOM_PROMPT,
+                            num_inference_steps=20,
+                        ).images
+
+                    current_psnr = calculate_psnr(inferred_image, target_images[idx])
+                    psnr_values.append(current_psnr)
+                        
+                    # Convert input images to PIL format
+                    pil_img = transforms.ToPILImage()(input_images[idx].cpu())
+                    pil_mask = transforms.ToPILImage()(input_masks[idx].cpu())
+                    pil_target = transforms.ToPILImage()(target_images[idx].cpu())
+
+                    save_epoch_sample(input_image=pil_img, 
+                                    input_mask=pil_mask,
+                                    inferred_image=inferred_image[0], 
+                                    target_image=pil_target,
+                                    epoch=epoch, 
+                                    sample_index=idx,
+                                    output_path=output_dir)
+
+            print(f"Average PSNR at epoch {epoch}: {np.mean(psnr_values)}")
 
     except Exception as e:
         print(f"Error during sample generation: {str(e)}")
@@ -119,6 +116,7 @@ def save_inpaint_samples(pipe, dataloader, epoch, output_dir):
     finally:
         # Ensure we return to training mode
         pipe.unet.train()
+
 
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
 def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back/data", 
@@ -211,7 +209,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
             # originaly named "latents" in train_dreambooth_inpaint_lora.py, here I used "target_latents" to make it more clear
             target_latents = vae.encode(targets.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor
-
             masked_latents = vae.encode(input_images.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor         
 
             mask = torch.stack(
@@ -240,7 +237,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
             )[0].to(torch_dtype)
 
             if first_time_ever:
-                save_inpaint_samples(pipe, test_loader, -1, train_dir)
+                calculate_psnr_and_save_inpaint_samples(pipe, test_loader, -1, train_dir)
                 first_time_ever = False
 
                 if save_latent_representations:
@@ -254,10 +251,10 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
                     normalized_masks = normalized_masks.repeat(1, 3, 1, 1)  # Convert from 1 to 3 channels
                     normalized_unpadded_masks = normalized_unpadded_masks.repeat(1, 3, 1, 1)  # Convert from 1 to 3 channels
 
-                    decoded_target_latents = vae.decode(target_latents)
-                    decoded_target_latents = (decoded_target_latents.sample / 2 + 0.5).clamp(0, 1)
-                    decoded_masked_latents = vae.decode(masked_latents)
-                    decoded_masked_latents = (decoded_masked_latents.sample / 2 + 0.5).clamp(0, 1)
+                    decoded_target_latents = vae.decode(target_latents).sample
+                    decoded_target_latents = (decoded_target_latents / 2 + 0.5).clamp(0, 1)
+                    decoded_masked_latents = vae.decode(masked_latents).sample
+                    decoded_masked_latents = (decoded_masked_latents / 2 + 0.5).clamp(0, 1)
 
                     for i in range(decoded_target_latents.shape[0]):
                         original_image_comparison = (torch.cat((normalized_targets[i], decoded_target_latents[i]), dim=2))
@@ -312,7 +309,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
         unet.eval()
         if (epoch + 1) % max(1, num_epochs // 10) == 0:
-            save_inpaint_samples(pipe, test_loader, epoch, train_dir)
+            calculate_psnr_and_save_inpaint_samples(pipe, train_loader, epoch, train_dir)
         unet.train()
 
         print(f"Epoch Loss: {epoch_loss / len(train_loader)}")
