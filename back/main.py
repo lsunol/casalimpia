@@ -2,6 +2,7 @@
 import argparse
 import os
 import json
+import logging
 from datetime import datetime
 
 # Manipulación de imágenes y datos
@@ -119,16 +120,13 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
 
 
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
-def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back/data", 
+def train_lora(model_id, train_loader, test_loader, val_loader, train_dir, 
                num_epochs=5, lr=1e-5, img_size=512, dtype="float32", 
-               save_latent_representations=False, lora_rank=16, lora_alpha=32):
+               save_latent_representations=False, lora_rank=16, lora_alpha=32, timestamp=None):
 
     torch_dtype = torch.float32 if dtype == "float32" else torch.float16
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     num_images = len(train_loader.dataset)
-    train_dir = f"{output_dir}/lora_trains/{timestamp}_{num_epochs}_epochs_{num_images}_images/"
-    os.makedirs(train_dir, exist_ok=True)
 
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
         model_id, torch_dtype=torch_dtype, safety_checker=None).to(device)
@@ -170,7 +168,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
         "lora_target_modules": lora_target_modules,
         "lora_dropout": lora_dropout,
         "save_latent_representations": save_latent_representations,
-        "num_images": num_images,
         "timestamp": timestamp
     }
     with (open(f"{train_dir}config_used.json", "w")) as file:
@@ -191,7 +188,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
     first_time_ever = True
     for epoch in range(num_epochs):
-        print(f"Epoch {epoch + 1}/{num_epochs}")
+        logger.info(f"Epoch {epoch + 1}/{num_epochs}")
 
         unet.train()
         epoch_loss = 0.0
@@ -238,7 +235,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
             if first_time_ever:
                 psnr = calculate_psnr_and_save_inpaint_samples(pipe, test_loader, -1, train_dir)
-                print(f"Initial PSNR: {psnr}")
+                logger.info(f"Initial PSNR: {psnr}")
 
                 first_time_ever = False
 
@@ -280,11 +277,11 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
                 loss = F.mse_loss(noise_pred.float(), target_noise.float(), reduction="mean")
 
-            print(f"Current loss: {loss.item()}")
+            logger.info(f"Batch loss: {loss.item()}")
             if not torch.isfinite(loss):
-                print("Warning: Non-finite loss detected!")
-                print(f"noise_pred stats: min={noise_pred.min()}, max={noise_pred.max()}, mean={noise_pred.mean()}")
-                print(f"target_noise stats: min={target_noise.min()}, max={target_noise.max()}, mean={target_noise.mean()}")
+                logger.warning("Warning: Non-finite loss detected!")
+                logger.warning(f"noise_pred stats: min={noise_pred.min()}, max={noise_pred.max()}, mean={noise_pred.mean()}")
+                logger.warning(f"target_noise stats: min={target_noise.min()}, max={target_noise.max()}, mean={target_noise.mean()}")
 
             # Solo usar el scaler si estamos en float16
             if dtype == "float16":
@@ -304,7 +301,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
             optimizer.zero_grad()
 
             if not torch.isfinite(loss):
-                print(f"Warning: Loss is {loss.item()}, skipping batch")
+                logger.warning(f"Warning: Loss is {loss.item()}, skipping batch")
                 continue
 
             epoch_loss += loss.item()
@@ -314,13 +311,13 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
             psnr = calculate_psnr_and_save_inpaint_samples(pipe, train_loader, epoch, train_dir)
         unet.train()
 
-        print(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
+        logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
 
     # Save LoRA weights
     # Verifica que el modelo tiene LoRA configurado antes de guardar
     assert hasattr(unet, "peft_config"), "El modelo UNet no tiene configurado LoRA."
 
-    print("Training complete. Saving LoRA weights...")
+    logger.info("Training complete. Saving LoRA weights...")
     unet.save_attn_procs(f"{train_dir}_lora_weights", unet_lora_layers=pipe.unet.attn_processors)
 
 
@@ -343,12 +340,30 @@ def read_parameters():
 
     return args
 
+args = read_parameters()
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+train_dir = f"{args.output_dir}/lora_trains/{timestamp}_{args.epochs}_epochs/"
+os.makedirs(train_dir, exist_ok=True)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(f"{train_dir}train.log", mode="a")],
+    )
+
+logger = logging.getLogger()
+
 # Main Function
 def main():
     
     initial_timestamp = datetime.now()
 
-    args = read_parameters()
+    logger.info("Start training")
 
     train_loader, val_loader, test_loader = load_dataset(
         inputs_dir=args.empty_rooms_dir, 
@@ -359,7 +374,8 @@ def main():
         train_ratio=0.7,
         val_ratio=0.15,
         test_ratio=0.15,
-        seed=42)
+        seed=42,
+        logger=logger)
 
     model_id = MODELS[args.model]
 
@@ -369,18 +385,20 @@ def main():
                val_loader, 
                num_epochs=args.epochs,
                lr=1e-5, 
-               output_dir=args.output_dir, 
+               train_dir=train_dir,
                img_size=args.img_size, 
                save_latent_representations=args.save_latent_representations,
                lora_rank=args.lora_rank,
                lora_alpha=args.lora_alpha,
-               dtype=args.dtype)
+               dtype=args.dtype,
+               timestamp=timestamp)
 
     final_timestamp = datetime.now()
-    print(f"Training completed. Initial timestamp: {initial_timestamp.strftime(TIMESTAMP_FORMAT)}.")
-    print(f"Final timestamp: {final_timestamp.strftime(TIMESTAMP_FORMAT)}.")
+    logger.info(f"Training completed. Initial timestamp: {initial_timestamp.strftime(TIMESTAMP_FORMAT)}.")
+    logger.info(f"Final timestamp: {final_timestamp.strftime(TIMESTAMP_FORMAT)}.")
     elapsed_time = final_timestamp - initial_timestamp
-    print(f"Elapsed time in seconds: {elapsed_time.total_seconds()}.")
+    logger.info(f"Elapsed time in seconds: {elapsed_time.total_seconds()}.")
+    logger.info("End training")
 
 if __name__ == "__main__":
     main()
