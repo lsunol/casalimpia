@@ -34,7 +34,7 @@ from tqdm import tqdm
 from empty_rooms_dataset import load_dataset
 from image_service import save_epoch_sample
 
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from metrics import calculate_psnr
 
 # Select GPU if available
@@ -108,7 +108,7 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
                                     sample_index=idx,
                                     output_path=output_dir)
 
-            print(f"Average PSNR at epoch {epoch}: {np.mean(psnr_values)}")
+            return np.mean(psnr_values)
 
     except Exception as e:
         print(f"Error during sample generation: {str(e)}")
@@ -237,7 +237,9 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
             )[0].to(torch_dtype)
 
             if first_time_ever:
-                calculate_psnr_and_save_inpaint_samples(pipe, test_loader, -1, train_dir)
+                psnr = calculate_psnr_and_save_inpaint_samples(pipe, test_loader, -1, train_dir)
+                print(f"Initial PSNR: {psnr}")
+
                 first_time_ever = False
 
                 if save_latent_representations:
@@ -264,7 +266,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
                         final_img = to_pil(torch.cat((original_image_comparison, masked_image_comparison, unpadded_padded_mask_comparison), dim=1))
                         final_img.save(f"{train_dir}sample_{i}_decoded_target_latents.png")
 
-            with autocast(enabled=(dtype == "float16")):
+            with autocast(device_type="cuda", enabled=(dtype == "float16")):
                 # Predict the noise residual
                 noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
 
@@ -309,10 +311,10 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
         unet.eval()
         if (epoch + 1) % max(1, num_epochs // 10) == 0:
-            calculate_psnr_and_save_inpaint_samples(pipe, train_loader, epoch, train_dir)
+            psnr = calculate_psnr_and_save_inpaint_samples(pipe, train_loader, epoch, train_dir)
         unet.train()
 
-        print(f"Epoch Loss: {epoch_loss / len(train_loader)}")
+        print(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
 
     # Save LoRA weights
     # Verifica que el modelo tiene LoRA configurado antes de guardar
