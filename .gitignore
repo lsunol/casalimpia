@@ -166,3 +166,7 @@ cython_debug/
 **/lora_weights/
 **/lora_weights/*
 **/lora_trains/*
+
+back/data/automaticMasks_new/
+
+back/data/emptyRooms_new/
