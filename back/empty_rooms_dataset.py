@@ -11,17 +11,18 @@ from scipy.ndimage import binary_dilation
 # Define the InpaintingDataset class within the module
 class InpaintingDataset(torch.utils.data.Dataset):
 
-    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms, mask_padding):
+    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms, mask_padding, logger):
         
+        self.logger = logger
         self.inputs_dir = inputs_dir
         self.masks_dir = masks_dir
         self.input_files = sorted(os.listdir(inputs_dir))
-        print("Number of input images:", len(self.input_files))
+        logger.info(f"Number of input images: {len(self.input_files)}")
         self.image_transforms = image_transforms
         self.masks_transforms = masks_transforms
         self.mask_files = sorted(os.listdir(self.masks_dir))
         self.length_masks = len(self.mask_files)
-        print("Number of masks:", self.length_masks)
+        logger.info(f"Number of masks: {self.length_masks}")
         self.mask_padding = mask_padding
 
     def __len__(self):
@@ -62,7 +63,7 @@ class InpaintingDataset(torch.utils.data.Dataset):
         return masked_image, add_padding_to_mask(mask, self.mask_padding), input_image, mask 
 
 # Load Dataset: prepara DataLoader para el batch training. INPUT are resized to (3, img_size, img_size)
-def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, mask_padding=10, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
+def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask_padding=10, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
 
     assert abs((train_ratio + val_ratio + test_ratio) - 1) < 1e-5, "The sum of train_ratio, val_ratio, and test_ratio must be equal to 1."
 
@@ -84,14 +85,15 @@ def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, mask_padding
         masks_dir=masks_dir,
         mask_padding=mask_padding,
         image_transforms=images_transforms,
-        masks_transforms=masks_transforms
+        masks_transforms=masks_transforms,
+        logger=logger
     )
     
     dataset_size = len(full_dataset)
     train_size = int(train_ratio * dataset_size)
     val_size = int(val_ratio * dataset_size)
     test_size = dataset_size - train_size - val_size
-    print(f"Train size: {train_size}, Validation size: {val_size}, Test size: {test_size}")
+    logger.info(f"Train size: {train_size}, Validation size: {val_size}, Test size: {test_size}")
 
     train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
         full_dataset,
