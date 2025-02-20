@@ -167,3 +167,4 @@ cython_debug/
 **/lora_weights/*
 **/lora_trains/*
 .lprof/settings.json
+wandb/*
