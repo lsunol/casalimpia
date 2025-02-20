@@ -3,7 +3,9 @@ import argparse
 import os
 import json
 import logging
+import wandb
 from datetime import datetime
+from image_service import save_image
 
 # Manipulación de imágenes y datos
 import numpy as np
@@ -225,7 +227,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, train_dir,
             noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps)
 
             # concatenate the noised latents with the mask and the masked latents
-            latent_model_input = torch.cat([noisy_latents, mask, target_latents], dim=1)
+            latent_model_input = torch.cat([noisy_latents, mask, masked_latents], dim=1)
 
             # Get the text embedding for conditioning
             # encoder_hidden_states = text_encoder(EMPTY_ROOM_PROMPT)[0].to(torch_dtype)
@@ -240,8 +242,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, train_dir,
                 first_time_ever = False
 
                 if save_latent_representations:
-                    # just to print latents and masked_latents
-                    from image_service import save_image
                     to_pil = transforms.ToPILImage()
                     normalized_input_images = (input_images / 2 + 0.5).clamp(0, 1)
                     normalized_targets = (targets / 2 + 0.5).clamp(0, 1)
@@ -250,15 +250,20 @@ def train_lora(model_id, train_loader, test_loader, val_loader, train_dir,
                     normalized_masks = normalized_masks.repeat(1, 3, 1, 1)  # Convert from 1 to 3 channels
                     normalized_unpadded_masks = normalized_unpadded_masks.repeat(1, 3, 1, 1)  # Convert from 1 to 3 channels
 
-                    decoded_target_latents = vae.decode(target_latents).sample
+                    decoded_target_latents = vae.decode(target_latents / vae.config.scaling_factor).sample
                     decoded_target_latents = (decoded_target_latents / 2 + 0.5).clamp(0, 1)
-                    decoded_masked_latents = vae.decode(masked_latents).sample
+                    decoded_masked_latents = vae.decode(masked_latents / vae.config.scaling_factor).sample
                     decoded_masked_latents = (decoded_masked_latents / 2 + 0.5).clamp(0, 1)
 
                     for i in range(decoded_target_latents.shape[0]):
-                        original_image_comparison = (torch.cat((normalized_targets[i], decoded_target_latents[i]), dim=2))
-                        masked_image_comparison = (torch.cat((normalized_input_images[i], decoded_masked_latents[i]), dim=2))                        
-                        unpadded_padded_mask_comparison = (torch.cat((normalized_unpadded_masks[i], normalized_masks[i]), dim=2))
+                        original_image_diff = torch.abs(normalized_targets[i] - decoded_target_latents[i])
+                        original_image_comparison = (torch.cat((normalized_targets[i], original_image_diff, decoded_target_latents[i]), dim=2))
+
+                        masked_image_diff = torch.abs(normalized_input_images[i] - decoded_masked_latents[i])
+                        masked_image_comparison = (torch.cat((normalized_input_images[i], masked_image_diff, decoded_masked_latents[i]), dim=2))                        
+
+                        mask_diff = torch.abs(normalized_unpadded_masks[i] - normalized_masks[i])
+                        unpadded_padded_mask_comparison = (torch.cat((normalized_unpadded_masks[i], mask_diff, normalized_masks[i]), dim=2))
 
                         final_img = to_pil(torch.cat((original_image_comparison, masked_image_comparison, unpadded_padded_mask_comparison), dim=1))
                         final_img.save(f"{train_dir}sample_{i}_decoded_target_latents.png")
@@ -278,6 +283,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, train_dir,
                 loss = F.mse_loss(noise_pred.float(), target_noise.float(), reduction="mean")
 
             logger.info(f"Batch loss: {loss.item()}")
+            wandb.log({"batch_loss": loss.item()})
             if not torch.isfinite(loss):
                 logger.warning("Warning: Non-finite loss detected!")
                 logger.warning(f"noise_pred stats: min={noise_pred.min()}, max={noise_pred.max()}, mean={noise_pred.mean()}")
@@ -311,6 +317,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, train_dir,
             psnr = calculate_psnr_and_save_inpaint_samples(pipe, train_loader, epoch, train_dir)
         unet.train()
 
+        wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr})
         logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
 
     # Save LoRA weights
@@ -335,6 +342,7 @@ def read_parameters():
     parser.add_argument("--dtype", type=str, choices=["float16", "float32"], default="float32", help="Data type for training: float16 or float32")
     parser.add_argument("--lora-rank", type=int, default=64, help="Rank for LoRA layers")
     parser.add_argument("--lora-alpha", type=int, default=128, help="Alpha scaling factor for LoRA layers")
+    parser.add_argument("--initial-learning-rate", type=float, default=1e-5, help="Learning rate for training")
     
     args = parser.parse_args()
 
@@ -363,6 +371,8 @@ def main():
     
     initial_timestamp = datetime.now()
 
+    wandb.init(project="casalimpia")
+
     logger.info("Start training")
 
     train_loader, val_loader, test_loader = load_dataset(
@@ -378,6 +388,18 @@ def main():
         logger=logger)
 
     model_id = MODELS[args.model]
+
+    wandb.run.name = f"{args.epochs:03d}_epochs_{len(train_loader.dataset):04d}_images_{args.lora_rank:03d}_rank_{args.lora_alpha:03d}_alpha"
+    wandb.config.update({
+        "model": model_id,
+        "num_epochs": args.epochs, 
+        "batch_size": args.batch_size,
+        "num_images": len(train_loader.dataset), 
+        "initial_lr": args.initial_learning_rate, 
+        "img_size": args.img_size, 
+        "dtype": args.dtype, 
+        "lora_rank": args.lora_rank, 
+        "lora_alpha": args.lora_alpha})
 
     train_lora(model_id, 
                train_loader, 
@@ -399,6 +421,9 @@ def main():
     elapsed_time = final_timestamp - initial_timestamp
     logger.info(f"Elapsed time in seconds: {elapsed_time.total_seconds()}.")
     logger.info("End training")
+    wandb.config.update({
+        "elapsed_time": elapsed_time.total_seconds(),
+        "status": "completed"})
 
 if __name__ == "__main__":
     main()
