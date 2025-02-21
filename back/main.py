@@ -103,6 +103,13 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
                     pil_mask = transforms.ToPILImage()(input_masks[idx].cpu())
                     pil_target = transforms.ToPILImage()(target_images[idx].cpu())
 
+                    images_to_log = [
+                        wandb.Image(pil_img, caption=f"input - epoch: {epoch}"),
+                        wandb.Image(pil_target, caption=f"target - epoch: {epoch}"),
+                        wandb.Image(inferred_image[0], caption=f"inferred - epoch: {epoch}")
+                    ]
+                    wandb.log({"images": images_to_log})
+
                     save_epoch_sample(input_image=pil_img, 
                                     input_mask=pil_mask,
                                     inferred_image=inferred_image[0], 
