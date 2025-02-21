@@ -122,7 +122,7 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
 
 
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
-def train_lora(model_id, train_loader, test_loader, val_loader, train_dir, 
+def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, train_dir, 
                num_epochs=5, lr=1e-5, img_size=512, dtype="float32", 
                save_latent_representations=False, lora_rank=16, lora_alpha=32, timestamp=None):
 
@@ -195,7 +195,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, train_dir,
         unet.train()
         epoch_loss = 0.0
 
-        for input_images, input_masks, targets, unpadded_masks in tqdm(train_loader):
+        for input_images, input_masks, targets, unpadded_masks in tqdm(sampling_loader):
 
             # Move to device
             input_images = input_images.to(device).to(torch_dtype)
@@ -236,7 +236,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, train_dir,
             )[0].to(torch_dtype)
 
             if first_time_ever:
-                psnr = calculate_psnr_and_save_inpaint_samples(pipe, test_loader, -1, train_dir)
+                psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, -1, train_dir)
                 logger.info(f"Initial PSNR: {psnr}")
 
                 first_time_ever = False
@@ -314,7 +314,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, train_dir,
 
         unet.eval()
         if (epoch + 1) % max(1, num_epochs // 10) == 0:
-            psnr = calculate_psnr_and_save_inpaint_samples(pipe, train_loader, epoch, train_dir)
+            psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, epoch, train_dir)
         unet.train()
 
         wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr})
@@ -375,7 +375,7 @@ def main():
 
     logger.info("Start training")
 
-    train_loader, val_loader, test_loader = load_dataset(
+    train_loader, val_loader, test_loader, sampling_loader = load_dataset(
         inputs_dir=args.empty_rooms_dir, 
         masks_dir=args.masks_dir, 
         batch_size=args.batch_size, 
@@ -405,6 +405,7 @@ def main():
                train_loader, 
                test_loader, 
                val_loader, 
+               sampling_loader,
                num_epochs=args.epochs,
                lr=1e-5, 
                train_dir=train_dir,
