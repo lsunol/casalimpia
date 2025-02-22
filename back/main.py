@@ -104,9 +104,9 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
                     pil_target = transforms.ToPILImage()(target_images[idx].cpu())
 
                     images_to_log = [
-                        wandb.Image(pil_img, caption=f"input - epoch: {epoch}"),
-                        wandb.Image(pil_target, caption=f"target - epoch: {epoch}"),
-                        wandb.Image(inferred_image[0], caption=f"inferred - epoch: {epoch}")
+                        wandb.Image(pil_img, caption=f"input - epoch: {epoch + 1}"),
+                        wandb.Image(pil_target, caption=f"target - epoch: {epoch + 1}"),
+                        wandb.Image(inferred_image[0], caption=f"inferred - epoch: {epoch + 1}")
                     ]
                     wandb.log({"images": images_to_log})
 
@@ -169,6 +169,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         "model_id": model_id,
         "num_epochs": num_epochs,
         "num_images": num_images,
+        "lr_scheduler": args.lr_scheduler,
         "lr": lr,
         "img_size": img_size,
         "dtype": dtype,
@@ -192,6 +193,14 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         lr=lr,
     )
     scaler = GradScaler()
+
+    lr_scheduler = get_scheduler(
+        args.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=int(len(train_loader) * num_epochs * 0.1),  # 10% of total steps as warmup
+        num_training_steps=len(train_loader) * num_epochs,
+        # num_training_steps=args.max_train_steps * accelerator.num_processes,
+    )
 
     noise_scheduler = DDPMScheduler.from_pretrained(model_id, subfolder="scheduler")    
 
@@ -310,7 +319,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
 
             # TODO: revisar si es necesario añadir lr_scheduler al sistema
-            # lr_scheduler.step()
+            lr_scheduler.step()
             optimizer.zero_grad()
 
             if not torch.isfinite(loss):
@@ -350,7 +359,8 @@ def read_parameters():
     parser.add_argument("--lora-rank", type=int, default=64, help="Rank for LoRA layers")
     parser.add_argument("--lora-alpha", type=int, default=128, help="Alpha scaling factor for LoRA layers")
     parser.add_argument("--initial-learning-rate", type=float, default=1e-5, help="Learning rate for training")
-    
+    parser.add_argument("--lr-scheduler", type=str, default="constant", help=('The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"]'),)
+
     args = parser.parse_args()
 
     return args
