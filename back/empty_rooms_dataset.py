@@ -60,7 +60,7 @@ class InpaintingDataset(torch.utils.data.Dataset):
 
         masked_image = merge_image_with_mask(input_image, mask)
 
-        return masked_image, add_padding_to_mask(mask, self.mask_padding), input_image, mask 
+        return masked_image, mask, input_image, mask 
 
 # Load Dataset: prepara DataLoader para el batch training. INPUT are resized to (3, img_size, img_size)
 def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask_padding=10, train_ratio=1, val_ratio=0, test_ratio=0, seed=42):
@@ -117,7 +117,7 @@ def merge_image_with_mask(input_image, mask_image):
     output_image = ((input_image + 1) * 127.5).astype(numpy.uint8)
     
     # Apply red mask (R=255, G=0, B=0)
-    mask = mask_image.squeeze() > 0
+    mask = mask_image.squeeze() > 0.5
     output_image[mask, 0] = 255  # Red channel
     output_image[mask, 1] = 0    # Green channel
     output_image[mask, 2] = 0    # Blue channel
