@@ -298,8 +298,9 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
                 loss = F.mse_loss(noise_pred.float(), target_noise.float(), reduction="mean")
 
-            logger.info(f"Batch loss: {loss.item()}")
-            wandb.log({"batch_loss": loss.item()})
+            logger.info(f"Batch loss: {loss.item()} | Learning rate: {lr_scheduler.get_last_lr()[0]}")
+            wandb.log({"batch_loss": loss.item(), "learning_rate": lr_scheduler.get_last_lr()[0]})
+
             if not torch.isfinite(loss):
                 logger.warning("Warning: Non-finite loss detected!")
                 logger.warning(f"noise_pred stats: min={noise_pred.min()}, max={noise_pred.max()}, mean={noise_pred.mean()}")
@@ -317,8 +318,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
                 torch.nn.utils.clip_grad_norm_(lora_layers, max_norm=1.0)
                 optimizer.step()
 
-
-            # TODO: revisar si es necesario añadir lr_scheduler al sistema
             lr_scheduler.step()
             optimizer.zero_grad()
 
@@ -424,7 +423,7 @@ def main():
                val_loader, 
                sampling_loader,
                num_epochs=args.epochs,
-               lr=1e-5, 
+               lr=args.initial_learning_rate, 
                train_dir=train_dir,
                img_size=args.img_size, 
                save_latent_representations=args.save_latent_representations,
