@@ -395,7 +395,7 @@ def main():
         inputs_dir=args.empty_rooms_dir, 
         masks_dir=args.masks_dir, 
         batch_size=args.batch_size, 
-        mask_padding=10,
+        mask_padding=0,
         img_size=args.img_size,
         train_ratio=0.7,
         val_ratio=0.15,
