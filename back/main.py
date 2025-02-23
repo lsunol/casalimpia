@@ -49,7 +49,6 @@ from image_service import save_epoch_sample  # Servicio para guardar ejemplos du
 
 from torch.amp import GradScaler, autocast
 from metrics import calculate_psnr
-import bitsandbytes as bnb
 
 # Select GPU if available
 if not torch.cuda.is_available():
@@ -342,38 +341,37 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
                     loss = F.mse_loss(noise_pred.float(), target_noise.float(), reduction="mean")
 
-            		logger.info(f"Batch loss: {loss.item()} | Learning rate: {lr_scheduler.get_last_lr()[0]}")
-            		wandb.log({"batch_loss": loss.item(), "learning_rate": lr_scheduler.get_last_lr()[0], "epoch": epoch + 1})
                 accelerator.backward(loss)
                 torch.nn.utils.clip_grad_norm_(lora_layers, max_norm=1.0)
                 optimizer.step()
-            	lr_scheduler.step()
+                lr_scheduler.step()
                 optimizer.zero_grad()
 
+            logger.info(f"Batch loss: {loss.item()} | Learning rate: {lr_scheduler.get_last_lr()[0]}")
+            wandb.log({"batch_loss": loss.item(), "learning_rate": lr_scheduler.get_last_lr()[0], "epoch": epoch + 1})
+
             epoch_loss += loss.item()
-            wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr, "epoch": epoch + 1})
 
         # Promedio de pérdida por época
         avg_epoch_loss = epoch_loss / len(train_loader)
-        wandb.log({"epoch_loss": avg_epoch_loss})
-        accelerator.print(f"Epoch {epoch+1} Loss: {avg_epoch_loss}")
+        wandb.log({"epoch_loss": avg_epoch_loss, "psnr": psnr, "epoch": epoch + 1})
+        accelerator.print(f"Epoch {epoch + 1} Loss: {avg_epoch_loss}")
 
         # LR actual
         current_lr = optimizer.param_groups[0]['lr']
-        wandb.log({"learning_rate": current_lr})
+        wandb.log({"learning_rate": current_lr, "epoch": epoch + 1})
 
         # Llamar a la función de sample cada 10 épocas
         unet.eval()
         if (epoch + 1) % max(1, num_epochs // 5) == 0:
             # Aquí usamos train_loader (o test_loader) para las muestras
             psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, epoch, train_dir)
-            wandb.log({"sample_psnr": psnr})
             accelerator.print(f"Epoch {epoch+1} - Saved samples, PSNR: {psnr}")
         unet.train()
 
         # Registrar métricas en CSV (ajusta PSNR si lo calculas)
         with open(metrics_log_file, "a") as f:
-		logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
+            logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
             f.write(f"{epoch},{avg_epoch_loss},{psnr if 'psnr' in locals() else 0}\n")
 
     # Final del entrenamiento
