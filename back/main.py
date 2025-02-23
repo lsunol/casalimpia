@@ -108,7 +108,7 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
                         wandb.Image(pil_target, caption=f"target - epoch: {epoch + 1}"),
                         wandb.Image(inferred_image[0], caption=f"inferred - epoch: {epoch + 1}")
                     ]
-                    wandb.log({"images": images_to_log})
+                    wandb.log({"images": images_to_log, "epoch": epoch + 1})
 
                     save_epoch_sample(input_image=pil_img, 
                                     input_mask=pil_mask,
@@ -299,7 +299,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
                 loss = F.mse_loss(noise_pred.float(), target_noise.float(), reduction="mean")
 
             logger.info(f"Batch loss: {loss.item()} | Learning rate: {lr_scheduler.get_last_lr()[0]}")
-            wandb.log({"batch_loss": loss.item(), "learning_rate": lr_scheduler.get_last_lr()[0]})
+            wandb.log({"batch_loss": loss.item(), "learning_rate": lr_scheduler.get_last_lr()[0], "epoch": epoch + 1})
 
             if not torch.isfinite(loss):
                 logger.warning("Warning: Non-finite loss detected!")
@@ -332,7 +332,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, epoch, train_dir)
         unet.train()
 
-        wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr})
+        wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr, "epoch": epoch + 1})
         logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
 
     # Save LoRA weights
