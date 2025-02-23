@@ -7,8 +7,13 @@ import wandb
 from datetime import datetime
 from image_service import save_image
 
+from accelerate import Accelerator
+from diffusers.optimization import get_scheduler
+
+
 # Manipulación de imágenes y datos
 import numpy as np
+
 
 # PyTorch y torchvision
 import torch
@@ -21,6 +26,10 @@ from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionInpaintPipeli
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_xformers_available
 
+from diffusers.optimization import get_scheduler  # Optimizadores personalizados
+from diffusers.utils import check_min_version, is_xformers_available  # Verificación de versiones y optimización de memoria
+
+
 # Transformers (Hugging Face)
 from transformers import CLIPTextModel
 
@@ -28,14 +37,15 @@ from transformers import CLIPTextModel
 from peft import LoraConfig
 
 # Hugging Face Hub
-from huggingface_hub import create_repo, upload_folder
+from huggingface_hub import create_repo, upload_folder  # Funcionalidades para subir modelos al Hub
 
 # Progreso y logging
 from tqdm import tqdm
 
+
 # Módulos personalizados
-from empty_rooms_dataset import load_dataset
-from image_service import save_epoch_sample
+from empty_rooms_dataset import load_dataset  # Carga del dataset de habitaciones vacías
+from image_service import save_epoch_sample  # Servicio para guardar ejemplos durante el entrenamiento
 
 from torch.amp import GradScaler, autocast
 from metrics import calculate_psnr
@@ -46,30 +56,40 @@ if not torch.cuda.is_available():
     exit(1)
 device = torch.device("cuda")
 
-# Enable flash attention, memory-efficient, and math optimizations if available
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_math_sdp(True)
+    print("Flash attention and related optimizations are ENABLED.")
+else:
+    print("CUDA is not available; flash attention optimizations are DISABLED.")
+
+# Enable flash attention, memory-efficient, and math optimizations if available. Optimizaciónes en CUDA
 if torch.cuda.is_available():
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
     torch.backends.cuda.enable_math_sdp(True)
 
+# Modelos predefinidos
 MODELS = {
     "stability-ai": "stabilityai/stable-diffusion-2-inpainting", 
     "runway": "runwayml/stable-diffusion-inpainting"
     }
-TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
-EMPTY_ROOM_PROMPT = [
+TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"              # Formato de timestamp(marca de timepo) para guardado de datos
+EMPTY_ROOM_PROMPT = [                           
     "A photo of an empty room with bare walls, clean floor, and no furniture or objects.",
     "Remove everything from the room except the walls, windows, doors and floor.",
     "Fill in the missing areas with structural background only, preserving the room's geometry. Do not generate furniture, decorations, or any identifiable objects. Maintain a uniform surface for walls, floors, and ceilings, blending seamlessly with the existing structure."
 ]
 
+# Generación de ejemplos después de cada época de entrenamiento
 # Add this new function after setup_model_with_lora and before train_lora
 def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir):
     """Generate and save inpainted samples after each epoch"""
 
     try:
-        # Store original state
-        pipe.unet.eval()
+        # Guarda el estado original: se pone el U-Net en modo evaluación
+        pipe.unet.eval()        # Cambia a modo evaluación pare el UNET para que no se actualizen los pesos
 
         with torch.no_grad():
 
@@ -121,11 +141,10 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
             return np.mean(psnr_values)
 
     except Exception as e:
-        print(f"Error during sample generation: {str(e)}")
+        print(f"Error during sample generation: {str(e)}")  # Captura y muestra cualquier error durante la generación de muestras.
 
     finally:
-        # Ensure we return to training mode
-        pipe.unet.train()
+        pipe.unet.train()        # Vuelve a modo entrenamiento
 
 
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
@@ -133,28 +152,37 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
                num_epochs=5, lr=1e-5, img_size=512, dtype="float32", 
                save_latent_representations=False, lora_rank=16, lora_alpha=32, timestamp=None):
 
+    # Determinar el tipo de dato
     torch_dtype = torch.float32 if dtype == "float32" else torch.float16
-
     num_images = len(train_loader.dataset)
 
+    # Archivo para guardar métricas de entrenamiento
+    metrics_log_file = os.path.join(train_dir, "training_metrics.csv")
+    with open(metrics_log_file, "w") as f:
+        f.write("epoch,epoch_loss,avg_psnr\n")
+
+    # Cargar el pipeline de inpainting
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
-        model_id, torch_dtype=torch_dtype, safety_checker=None).to(device)
+        model_id, torch_dtype=torch_dtype, safety_checker=None
+    ).to(device)
     pipe.set_progress_bar_config(disable=True)
 
-    # Add autoencoder to the pipeline
+    # Cargar componentes: text encoder, VAE y U-Net
     text_encoder = CLIPTextModel.from_pretrained(model_id, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(model_id, subfolder="unet")
 
-    # Only train additional adapter LoRA layers
-    vae.requires_grad_(False) 
+    # Congelar gradientes para VAE, text encoder y U-Net (se entrena solo LoRA)
+    vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     unet.requires_grad_(False)
 
+    # Enviar modelos a GPU y configurar tipo de dato
     unet.to(device, dtype=torch_dtype)
     vae.to(device, dtype=torch_dtype)
     text_encoder.to(device, dtype=torch_dtype)
 
+    # Configurar LoRA en U-Net
     lora_target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
     lora_dropout = 0.1
     unet_lora_config = LoraConfig(
@@ -164,7 +192,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         init_lora_weights="gaussian",
         lora_dropout=lora_dropout,
     )
- 
+
+    # Guardar config usada
     config_used = {
         "model_id": model_id,
         "num_epochs": num_epochs,
@@ -180,18 +209,29 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         "save_latent_representations": save_latent_representations,
         "timestamp": timestamp
     }
-    with (open(f"{train_dir}config_used.json", "w")) as file:
+    with open(os.path.join(train_dir, "config_used.json"), "w") as file:
         json.dump(config_used, file, indent=4)
 
+    # Agregar adaptadores LoRA
     unet.add_adapter(unet_lora_config)
     pipe.unet = unet
 
+    # Parámetros LoRA
     lora_layers = list(filter(lambda p: p.requires_grad, unet.parameters()))
 
-    optimizer = torch.optim.AdamW(
-        lora_layers,
-        lr=lr,
+    # Optimizador
+    #optimizer = bnb.optim.Adam8bit(lora_layers, lr=lr)
+    optimizer = torch.optim.AdamW(lora_layers, lr=lr)
+
+
+        # Integrar Accelerate
+    from accelerate import Accelerator
+    accelerator = Accelerator()
+    unet, optimizer, train_loader = accelerator.prepare(
+        unet, optimizer, train_loader
     )
+
+    # GradScaler para mixed precision (si dtype == "float16")
     scaler = GradScaler()
 
     lr_scheduler = get_scheduler(
@@ -201,7 +241,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         num_training_steps=len(train_loader) * num_epochs,
         # num_training_steps=args.max_train_steps * accelerator.num_processes,
     )
-
+	
+    # Noise scheduler para la difusión
     noise_scheduler = DDPMScheduler.from_pretrained(model_id, subfolder="scheduler")    
 
     first_time_ever = True
@@ -214,21 +255,23 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         for input_images, input_masks, targets, unpadded_masks in tqdm(sampling_loader):
 
             # Move to device
-            input_images = input_images.to(device).to(torch_dtype)
-            input_masks = input_masks.to(device).to(torch_dtype)
-            targets = targets.to(device).to(torch_dtype)
-            unpadded_masks = unpadded_masks.to(device).to(torch_dtype)
+            input_images = input_images.to(device, dtype=torch_dtype)
+            input_masks = input_masks.to(device, dtype=torch_dtype)
+            targets = targets.to(device, dtype=torch_dtype)
+            unpadded_masks = unpadded_masks.to(device, dtype=torch_dtype)
 
-            # code based in train_dreambooth_inpaint_lora.py
+            # Codificar con VAE
             # https://github.com/huggingface/diffusers/blob/main/examples/research_projects/dreambooth_inpaint/train_dreambooth_inpaint_lora.py
 
             # originaly named "latents" in train_dreambooth_inpaint_lora.py, here I used "target_latents" to make it more clear
             target_latents = vae.encode(targets.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor
             masked_latents = vae.encode(input_images.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor         
 
-            mask = torch.stack(
-                [torch.nn.functional.interpolate(mask.unsqueeze(0), size=(img_size // 8, img_size // 8)) for mask in input_masks]
-            ).to(torch_dtype)
+            # Redimensionar la máscara a la resolución latente
+            mask = torch.stack([
+                torch.nn.functional.interpolate(m.unsqueeze(0), size=(img_size // 8, img_size // 8))
+                for m in input_masks
+            ]).to(torch_dtype)
             mask = mask.reshape(-1, 1, img_size // 8, img_size // 8)
 
             # Sample noise that we'll add to the latents
@@ -242,11 +285,10 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             # (forward diffusion process)
             noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps)
 
-            # concatenate the noised latents with the mask and the masked latents
+            # Concatenar: [B, 9, 64, 64]
             latent_model_input = torch.cat([noisy_latents, mask, masked_latents], dim=1)
 
-            # Get the text embedding for conditioning
-            # encoder_hidden_states = text_encoder(EMPTY_ROOM_PROMPT)[0].to(torch_dtype)
+            # Condicionamiento textual
             encoder_hidden_states = text_encoder(
                 pipe.tokenizer([EMPTY_ROOM_PROMPT[0]] * bsz, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
             )[0].to(torch_dtype)
@@ -283,66 +325,64 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
                         final_img = to_pil(torch.cat((original_image_comparison, masked_image_comparison, unpadded_padded_mask_comparison), dim=1))
                         final_img.save(f"{train_dir}sample_{i}_decoded_target_latents.png")
+            
+			# Entrenamiento con acumulación de gradientes
+            with accelerator.accumulate(unet):
+                with autocast(device_type="cuda", enabled=(dtype=="float16")):
+                    noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
 
-            with autocast(device_type="cuda", enabled=(dtype == "float16")):
-                # Predict the noise residual
-                noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
+                    # Determinar el target según el tipo de predicción
+                    if noise_scheduler.config.prediction_type == "epsilon":
+                        target_noise = noise
+                    elif noise_scheduler.config.prediction_type == "v_prediction":
+                        target_noise = noise_scheduler.get_velocity(target_latents, noise, timesteps)
+                    else:
+                        raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-                # Get the target for loss depending on the prediction type
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    target_noise = noise
-                elif noise_scheduler.config.prediction_type == "v_prediction":
-                    target_noise = noise_scheduler.get_velocity(target_latents, noise, timesteps)
-                else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                    loss = F.mse_loss(noise_pred.float(), target_noise.float(), reduction="mean")
 
-                loss = F.mse_loss(noise_pred.float(), target_noise.float(), reduction="mean")
+                accelerator.backward(loss)
+                torch.nn.utils.clip_grad_norm_(lora_layers, max_norm=1.0)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
 
             logger.info(f"Batch loss: {loss.item()} | Learning rate: {lr_scheduler.get_last_lr()[0]}")
             wandb.log({"batch_loss": loss.item(), "learning_rate": lr_scheduler.get_last_lr()[0], "epoch": epoch + 1})
 
-            if not torch.isfinite(loss):
-                logger.warning("Warning: Non-finite loss detected!")
-                logger.warning(f"noise_pred stats: min={noise_pred.min()}, max={noise_pred.max()}, mean={noise_pred.mean()}")
-                logger.warning(f"target_noise stats: min={target_noise.min()}, max={target_noise.max()}, mean={target_noise.mean()}")
-
-            # Solo usar el scaler si estamos en float16
-            if dtype == "float16":
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(lora_layers, max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(lora_layers, max_norm=1.0)
-                optimizer.step()
-
-            lr_scheduler.step()
-            optimizer.zero_grad()
-
-            if not torch.isfinite(loss):
-                logger.warning(f"Warning: Loss is {loss.item()}, skipping batch")
-                continue
-
             epoch_loss += loss.item()
 
+        # Promedio de pérdida por época
+        avg_epoch_loss = epoch_loss / len(train_loader)
+        wandb.log({"epoch_loss": avg_epoch_loss, "psnr": psnr, "epoch": epoch + 1})
+        accelerator.print(f"Epoch {epoch + 1} Loss: {avg_epoch_loss}")
+
+        # LR actual
+        current_lr = optimizer.param_groups[0]['lr']
+        wandb.log({"learning_rate": current_lr, "epoch": epoch + 1})
+
+        # Llamar a la función de sample cada 10 épocas
         unet.eval()
-        if (epoch + 1) % max(1, num_epochs // 10) == 0:
+        if (epoch + 1) % max(1, num_epochs // 5) == 0:
+            # Aquí usamos train_loader (o test_loader) para las muestras
             psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, epoch, train_dir)
+            accelerator.print(f"Epoch {epoch+1} - Saved samples, PSNR: {psnr}")
         unet.train()
 
-        wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr, "epoch": epoch + 1})
-        logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
+        # Registrar métricas en CSV (ajusta PSNR si lo calculas)
+        with open(metrics_log_file, "a") as f:
+            logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
+            f.write(f"{epoch},{avg_epoch_loss},{psnr if 'psnr' in locals() else 0}\n")
 
-    # Save LoRA weights
-    # Verifica que el modelo tiene LoRA configurado antes de guardar
+    # Final del entrenamiento
+    accelerator.wait_for_everyone()
+    accelerator.print("Training complete. Saving final LoRA weights...")
+    unet = accelerator.unwrap_model(unet)
     assert hasattr(unet, "peft_config"), "El modelo UNet no tiene configurado LoRA."
-
-    logger.info("Training complete. Saving LoRA weights...")
     unet.save_attn_procs(f"{train_dir}_lora_weights", unet_lora_layers=pipe.unet.attn_processors)
 
 
+# Función para leer y parsear los parámetros pasados por línea de comando
 def read_parameters():
 
     parser = argparse.ArgumentParser(description="Entrenar modelo de segmentación con LoRA")

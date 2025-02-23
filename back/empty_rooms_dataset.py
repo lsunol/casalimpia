@@ -63,16 +63,16 @@ class InpaintingDataset(torch.utils.data.Dataset):
         return masked_image, add_padding_to_mask(mask, self.mask_padding), input_image, mask 
 
 # Load Dataset: prepara DataLoader para el batch training. INPUT are resized to (3, img_size, img_size)
-def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask_padding=10, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
+def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask_padding=0, train_ratio=1, val_ratio=0, test_ratio=0, seed=42):
 
     assert abs((train_ratio + val_ratio + test_ratio) - 1) < 1e-5, "The sum of train_ratio, val_ratio, and test_ratio must be equal to 1."
 
-    images_transforms_random_crop = transforms.Compose([
-        transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.RandomCrop(img_size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    ])
+    images_transforms_random_crop = transforms.Compose([                                                    
+        transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC),        # Redimensiona a (512, 512)
+        transforms.RandomCrop(img_size),                                                        # Corta una región de 512x512
+        transforms.ToTensor(),                                                                  # Convierte a tensor: [3, 512, 512] y escala los píxeles a [0,1]
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])                         # Normaliza a [-1,1]
+    ])                                                                                                                          #Resultado: Tensor de forma [3, 512, 512], tipo torch.float32, con valores en [-1, 1].
 
     masks_transforms_random_crop = transforms.Compose([
         transforms.Resize(img_size),

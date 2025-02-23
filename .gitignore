@@ -168,3 +168,7 @@ cython_debug/
 **/lora_trains/*
 .lprof/settings.json
 wandb/*
+
+back/data/automaticMasks_new/
+
+back/data/emptyRooms_new/
