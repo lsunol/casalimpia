@@ -2,49 +2,43 @@
 import argparse
 import os
 import json
+import logging
+import wandb
 from datetime import datetime
-import hashlib as insecure_hashlib  # Renombrado para evitar conflictos
+from image_service import save_image
 
 # Manipulación de imágenes y datos
 import numpy as np
-from PIL import Image, ImageDraw
 
 # PyTorch y torchvision
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from torch.utils.data import Dataset
 from torchvision import transforms
 
 # Hugging Face y Diffusers
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionInpaintPipeline, UNet2DConditionModel
-from diffusers.models.attention_processor import LoRAAttnProcessor
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_xformers_available
-from diffusers.loaders import AttnProcsLayers
 
 # Transformers (Hugging Face)
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel
 
 # PEFT (Parameter-Efficient Fine-Tuning)
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig
 
 # Hugging Face Hub
 from huggingface_hub import create_repo, upload_folder
 
 # Progreso y logging
 from tqdm import tqdm
-from tqdm.auto import tqdm as auto_tqdm
 
 # Módulos personalizados
 from empty_rooms_dataset import load_dataset
 from image_service import save_epoch_sample
 
-# Otras utilidades
-from mit_semseg.utils import colorEncode
-from safetensors.torch import save_file
-
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
+from metrics import calculate_psnr
 
 # Select GPU if available
 if not torch.cuda.is_available():
@@ -70,7 +64,7 @@ EMPTY_ROOM_PROMPT = [
 ]
 
 # Add this new function after setup_model_with_lora and before train_lora
-def save_inpaint_samples(pipe, dataloader, epoch, output_dir):
+def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir):
     """Generate and save inpainted samples after each epoch"""
 
     try:
@@ -78,40 +72,53 @@ def save_inpaint_samples(pipe, dataloader, epoch, output_dir):
         pipe.unet.eval()
 
         with torch.no_grad():
-            # Get a batch of images
-            input_images, input_masks, target_images, unpadded_masks = next(iter(dataloader))
 
-            # Process on GPU
-            input_images = input_images.to(device)
-            input_masks = input_masks.to(device)
+            psnr_values = []
 
-            # Denormalize images
-            input_images = ((input_images + 1) / 2).clamp(0, 1)
-            target_images = ((target_images + 1) / 2).clamp(0, 1)
+            for input_images, input_masks, target_images, _ in dataloader:
 
-            max_samples = 3
-            # Only process up to 3 images from the batch
-            for idx in range(min(max_samples, input_images.size(0))):
-                # Convert input images to PIL format
-                pil_img = transforms.ToPILImage()(input_images[idx].cpu())
-                pil_mask = transforms.ToPILImage()(input_masks[idx].cpu())
-                pil_target = transforms.ToPILImage()(target_images[idx].cpu())
+                # Process on GPU
+                input_images = input_images.to(device)
+                input_masks = input_masks.to(device)
 
-                with torch.autocast(device.type):
-                    inferred_image = pipe(
-                        image=pil_img,
-                        mask_image=pil_mask,
-                        prompt=EMPTY_ROOM_PROMPT,
-                        num_inference_steps=20,
-                    ).images
+                # Denormalize images
+                input_images = ((input_images + 1) / 2).clamp(0, 1)
+                target_images = ((target_images + 1) / 2).clamp(0, 1)
 
-                save_epoch_sample(input_image=pil_img, 
-                                input_mask=pil_mask,
-                                inferred_image=inferred_image[0], 
-                                target_image=pil_target,
-                                epoch=epoch, 
-                                sample_index=idx,
-                                output_path=output_dir)
+                for idx in range(input_images.size(0)):
+
+                    with torch.autocast(device.type):
+                        inferred_image = pipe(
+                            image=input_images[idx],
+                            mask_image=input_masks[idx],
+                            prompt=EMPTY_ROOM_PROMPT,
+                            num_inference_steps=20,
+                        ).images
+
+                    current_psnr = calculate_psnr(inferred_image, target_images[idx])
+                    psnr_values.append(current_psnr)
+                        
+                    # Convert input images to PIL format
+                    pil_img = transforms.ToPILImage()(input_images[idx].cpu())
+                    pil_mask = transforms.ToPILImage()(input_masks[idx].cpu())
+                    pil_target = transforms.ToPILImage()(target_images[idx].cpu())
+
+                    images_to_log = [
+                        wandb.Image(pil_img, caption=f"input - epoch: {epoch + 1}"),
+                        wandb.Image(pil_target, caption=f"target - epoch: {epoch + 1}"),
+                        wandb.Image(inferred_image[0], caption=f"inferred - epoch: {epoch + 1}")
+                    ]
+                    wandb.log({"images": images_to_log, "epoch": epoch + 1})
+
+                    save_epoch_sample(input_image=pil_img, 
+                                    input_mask=pil_mask,
+                                    inferred_image=inferred_image[0], 
+                                    target_image=pil_target,
+                                    epoch=epoch, 
+                                    sample_index=idx,
+                                    output_path=output_dir)
+
+            return np.mean(psnr_values)
 
     except Exception as e:
         print(f"Error during sample generation: {str(e)}")
@@ -120,17 +127,15 @@ def save_inpaint_samples(pipe, dataloader, epoch, output_dir):
         # Ensure we return to training mode
         pipe.unet.train()
 
+
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
-def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back/data", 
+def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, train_dir, 
                num_epochs=5, lr=1e-5, img_size=512, dtype="float32", 
-               save_latent_representations=False, lora_rank=16, lora_alpha=32):
+               save_latent_representations=False, lora_rank=16, lora_alpha=32, timestamp=None):
 
     torch_dtype = torch.float32 if dtype == "float32" else torch.float16
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     num_images = len(train_loader.dataset)
-    train_dir = f"{output_dir}/lora_trains/{timestamp}_{num_epochs}_epochs_{num_images}_images/"
-    os.makedirs(train_dir, exist_ok=True)
 
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
         model_id, torch_dtype=torch_dtype, safety_checker=None).to(device)
@@ -164,6 +169,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
         "model_id": model_id,
         "num_epochs": num_epochs,
         "num_images": num_images,
+        "lr_scheduler": args.lr_scheduler,
         "lr": lr,
         "img_size": img_size,
         "dtype": dtype,
@@ -172,7 +178,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
         "lora_target_modules": lora_target_modules,
         "lora_dropout": lora_dropout,
         "save_latent_representations": save_latent_representations,
-        "num_images": num_images,
         "timestamp": timestamp
     }
     with (open(f"{train_dir}config_used.json", "w")) as file:
@@ -189,16 +194,24 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
     )
     scaler = GradScaler()
 
+    lr_scheduler = get_scheduler(
+        args.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=int(len(train_loader) * num_epochs * 0.1),  # 10% of total steps as warmup
+        num_training_steps=len(train_loader) * num_epochs,
+        # num_training_steps=args.max_train_steps * accelerator.num_processes,
+    )
+
     noise_scheduler = DDPMScheduler.from_pretrained(model_id, subfolder="scheduler")    
 
     first_time_ever = True
     for epoch in range(num_epochs):
-        print(f"Epoch {epoch + 1}/{num_epochs}")
+        logger.info(f"Epoch {epoch + 1}/{num_epochs}")
 
         unet.train()
         epoch_loss = 0.0
 
-        for input_images, input_masks, targets, unpadded_masks in tqdm(train_loader):
+        for input_images, input_masks, targets, unpadded_masks in tqdm(sampling_loader):
 
             # Move to device
             input_images = input_images.to(device).to(torch_dtype)
@@ -211,7 +224,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
             # originaly named "latents" in train_dreambooth_inpaint_lora.py, here I used "target_latents" to make it more clear
             target_latents = vae.encode(targets.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor
-
             masked_latents = vae.encode(input_images.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor         
 
             mask = torch.stack(
@@ -231,7 +243,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
             noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps)
 
             # concatenate the noised latents with the mask and the masked latents
-            latent_model_input = torch.cat([noisy_latents, mask, target_latents], dim=1)
+            latent_model_input = torch.cat([noisy_latents, mask, masked_latents], dim=1)
 
             # Get the text embedding for conditioning
             # encoder_hidden_states = text_encoder(EMPTY_ROOM_PROMPT)[0].to(torch_dtype)
@@ -240,12 +252,12 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
             )[0].to(torch_dtype)
 
             if first_time_ever:
-                save_inpaint_samples(pipe, test_loader, -1, train_dir)
+                psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, -1, train_dir)
+                logger.info(f"Initial PSNR: {psnr}")
+
                 first_time_ever = False
 
                 if save_latent_representations:
-                    # just to print latents and masked_latents
-                    from image_service import save_image
                     to_pil = transforms.ToPILImage()
                     normalized_input_images = (input_images / 2 + 0.5).clamp(0, 1)
                     normalized_targets = (targets / 2 + 0.5).clamp(0, 1)
@@ -254,20 +266,25 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
                     normalized_masks = normalized_masks.repeat(1, 3, 1, 1)  # Convert from 1 to 3 channels
                     normalized_unpadded_masks = normalized_unpadded_masks.repeat(1, 3, 1, 1)  # Convert from 1 to 3 channels
 
-                    decoded_target_latents = vae.decode(target_latents)
-                    decoded_target_latents = (decoded_target_latents.sample / 2 + 0.5).clamp(0, 1)
-                    decoded_masked_latents = vae.decode(masked_latents)
-                    decoded_masked_latents = (decoded_masked_latents.sample / 2 + 0.5).clamp(0, 1)
+                    decoded_target_latents = vae.decode(target_latents / vae.config.scaling_factor).sample
+                    decoded_target_latents = (decoded_target_latents / 2 + 0.5).clamp(0, 1)
+                    decoded_masked_latents = vae.decode(masked_latents / vae.config.scaling_factor).sample
+                    decoded_masked_latents = (decoded_masked_latents / 2 + 0.5).clamp(0, 1)
 
                     for i in range(decoded_target_latents.shape[0]):
-                        original_image_comparison = (torch.cat((normalized_targets[i], decoded_target_latents[i]), dim=2))
-                        masked_image_comparison = (torch.cat((normalized_input_images[i], decoded_masked_latents[i]), dim=2))                        
-                        unpadded_padded_mask_comparison = (torch.cat((normalized_unpadded_masks[i], normalized_masks[i]), dim=2))
+                        original_image_diff = torch.abs(normalized_targets[i] - decoded_target_latents[i])
+                        original_image_comparison = (torch.cat((normalized_targets[i], original_image_diff, decoded_target_latents[i]), dim=2))
+
+                        masked_image_diff = torch.abs(normalized_input_images[i] - decoded_masked_latents[i])
+                        masked_image_comparison = (torch.cat((normalized_input_images[i], masked_image_diff, decoded_masked_latents[i]), dim=2))                        
+
+                        mask_diff = torch.abs(normalized_unpadded_masks[i] - normalized_masks[i])
+                        unpadded_padded_mask_comparison = (torch.cat((normalized_unpadded_masks[i], mask_diff, normalized_masks[i]), dim=2))
 
                         final_img = to_pil(torch.cat((original_image_comparison, masked_image_comparison, unpadded_padded_mask_comparison), dim=1))
                         final_img.save(f"{train_dir}sample_{i}_decoded_target_latents.png")
 
-            with autocast(enabled=(dtype == "float16")):
+            with autocast(device_type="cuda", enabled=(dtype == "float16")):
                 # Predict the noise residual
                 noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
 
@@ -281,11 +298,13 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
 
                 loss = F.mse_loss(noise_pred.float(), target_noise.float(), reduction="mean")
 
-            print(f"Current loss: {loss.item()}")
+            logger.info(f"Batch loss: {loss.item()} | Learning rate: {lr_scheduler.get_last_lr()[0]}")
+            wandb.log({"batch_loss": loss.item(), "learning_rate": lr_scheduler.get_last_lr()[0], "epoch": epoch + 1})
+
             if not torch.isfinite(loss):
-                print("Warning: Non-finite loss detected!")
-                print(f"noise_pred stats: min={noise_pred.min()}, max={noise_pred.max()}, mean={noise_pred.mean()}")
-                print(f"target_noise stats: min={target_noise.min()}, max={target_noise.max()}, mean={target_noise.mean()}")
+                logger.warning("Warning: Non-finite loss detected!")
+                logger.warning(f"noise_pred stats: min={noise_pred.min()}, max={noise_pred.max()}, mean={noise_pred.mean()}")
+                logger.warning(f"target_noise stats: min={target_noise.min()}, max={target_noise.max()}, mean={target_noise.mean()}")
 
             # Solo usar el scaler si estamos en float16
             if dtype == "float16":
@@ -299,29 +318,28 @@ def train_lora(model_id, train_loader, test_loader, val_loader, output_dir="back
                 torch.nn.utils.clip_grad_norm_(lora_layers, max_norm=1.0)
                 optimizer.step()
 
-
-            # TODO: revisar si es necesario añadir lr_scheduler al sistema
-            # lr_scheduler.step()
+            lr_scheduler.step()
             optimizer.zero_grad()
 
             if not torch.isfinite(loss):
-                print(f"Warning: Loss is {loss.item()}, skipping batch")
+                logger.warning(f"Warning: Loss is {loss.item()}, skipping batch")
                 continue
 
             epoch_loss += loss.item()
 
         unet.eval()
         if (epoch + 1) % max(1, num_epochs // 10) == 0:
-            save_inpaint_samples(pipe, test_loader, epoch, train_dir)
+            psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, epoch, train_dir)
         unet.train()
 
-        print(f"Epoch Loss: {epoch_loss / len(train_loader)}")
+        wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr, "epoch": epoch + 1})
+        logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
 
     # Save LoRA weights
     # Verifica que el modelo tiene LoRA configurado antes de guardar
     assert hasattr(unet, "peft_config"), "El modelo UNet no tiene configurado LoRA."
 
-    print("Training complete. Saving LoRA weights...")
+    logger.info("Training complete. Saving LoRA weights...")
     unet.save_attn_procs(f"{train_dir}_lora_weights", unet_lora_layers=pipe.unet.attn_processors)
 
 
@@ -336,57 +354,93 @@ def read_parameters():
     parser.add_argument("--model", type=str, choices=["stability-ai", "runway"], default="stability-ai", help="Model to use: \"stability-ai\" (default) or \"runway\"")
     parser.add_argument("--img-size", type=int, default=512, help="Image size for training")
     parser.add_argument("--save-latent-representations", action="store_true", help="Save latent representations during training")
-    parser.add_argument("--dtype", type=str, choices=["float16", "float32"], 
-                       default="float32", help="Data type for training: float16 or float32")
-    
+    parser.add_argument("--dtype", type=str, choices=["float16", "float32"], default="float32", help="Data type for training: float16 or float32")
+    parser.add_argument("--lora-rank", type=int, default=64, help="Rank for LoRA layers")
+    parser.add_argument("--lora-alpha", type=int, default=128, help="Alpha scaling factor for LoRA layers")
+    parser.add_argument("--initial-learning-rate", type=float, default=1e-5, help="Learning rate for training")
+    parser.add_argument("--lr-scheduler", type=str, default="constant", help=('The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"]'),)
+
     args = parser.parse_args()
 
-    return (args.empty_rooms_dir, 
-            args.masks_dir, 
-            args.epochs,
-            args.batch_size, 
-            args.output_dir, 
-            args.model, 
-            args.img_size, 
-            args.save_latent_representations,
-            args.dtype)
+    return args
+
+args = read_parameters()
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+train_dir = f"{args.output_dir}/lora_trains/{timestamp}_{args.epochs}_epochs/"
+os.makedirs(train_dir, exist_ok=True)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(f"{train_dir}train.log", mode="a")],
+    )
+
+logger = logging.getLogger()
 
 # Main Function
 def main():
     
     initial_timestamp = datetime.now()
 
-    empty_rooms_dir, masks_dir, epochs, batch_size, output_dir, model_id_parameter, img_size, save_latent_representations, dtype = read_parameters()
+    wandb.init(project="casalimpia")
 
-    train_loader, val_loader, test_loader = load_dataset(
-        inputs_dir=empty_rooms_dir, 
-        masks_dir=masks_dir, 
-        batch_size=batch_size, 
+    logger.info("Start training")
+
+    train_loader, val_loader, test_loader, sampling_loader = load_dataset(
+        inputs_dir=args.empty_rooms_dir, 
+        masks_dir=args.masks_dir, 
+        batch_size=args.batch_size, 
         mask_padding=10,
-        img_size=img_size,
+        img_size=args.img_size,
         train_ratio=0.7,
         val_ratio=0.15,
         test_ratio=0.15,
-        seed=42)
+        seed=42,
+        logger=logger)
 
-    model_id = MODELS[model_id_parameter]
+    model_id = MODELS[args.model]
+
+    wandb.run.name = f"{args.epochs:03d}_epochs_{len(train_loader.dataset):04d}_images_{args.lora_rank:03d}_rank_{args.lora_alpha:03d}_alpha"
+    wandb.config.update({
+        "model": model_id,
+        "num_epochs": args.epochs, 
+        "batch_size": args.batch_size,
+        "num_images": len(train_loader.dataset), 
+        "initial_lr": args.initial_learning_rate, 
+        "img_size": args.img_size, 
+        "dtype": args.dtype, 
+        "lora_rank": args.lora_rank, 
+        "lora_alpha": args.lora_alpha})
 
     train_lora(model_id, 
                train_loader, 
                test_loader, 
                val_loader, 
-               num_epochs=epochs,
-               lr=1e-5, 
-               output_dir=output_dir, 
-               img_size=img_size, 
-               save_latent_representations=save_latent_representations,
-               dtype=dtype)
+               sampling_loader,
+               num_epochs=args.epochs,
+               lr=args.initial_learning_rate, 
+               train_dir=train_dir,
+               img_size=args.img_size, 
+               save_latent_representations=args.save_latent_representations,
+               lora_rank=args.lora_rank,
+               lora_alpha=args.lora_alpha,
+               dtype=args.dtype,
+               timestamp=timestamp)
 
     final_timestamp = datetime.now()
-    print(f"Training completed. Initial timestamp: {initial_timestamp.strftime(TIMESTAMP_FORMAT)}.")
-    print(f"Final timestamp: {final_timestamp.strftime(TIMESTAMP_FORMAT)}.")
+    logger.info(f"Training completed. Initial timestamp: {initial_timestamp.strftime(TIMESTAMP_FORMAT)}.")
+    logger.info(f"Final timestamp: {final_timestamp.strftime(TIMESTAMP_FORMAT)}.")
     elapsed_time = final_timestamp - initial_timestamp
-    print(f"Elapsed time in seconds: {elapsed_time.total_seconds()}.")
+    logger.info(f"Elapsed time in seconds: {elapsed_time.total_seconds()}.")
+    logger.info("End training")
+    wandb.config.update({
+        "elapsed_time": elapsed_time.total_seconds(),
+        "status": "completed"})
 
 if __name__ == "__main__":
     main()

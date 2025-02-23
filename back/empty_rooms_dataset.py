@@ -11,17 +11,18 @@ from scipy.ndimage import binary_dilation
 # Define the InpaintingDataset class within the module
 class InpaintingDataset(torch.utils.data.Dataset):
 
-    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms, mask_padding):
+    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms, mask_padding, logger):
         
+        self.logger = logger
         self.inputs_dir = inputs_dir
         self.masks_dir = masks_dir
         self.input_files = sorted(os.listdir(inputs_dir))
-        print("Number of input images:", len(self.input_files))
+        logger.info(f"Number of input images: {len(self.input_files)}")
         self.image_transforms = image_transforms
         self.masks_transforms = masks_transforms
         self.mask_files = sorted(os.listdir(self.masks_dir))
         self.length_masks = len(self.mask_files)
-        print("Number of masks:", self.length_masks)
+        logger.info(f"Number of masks: {self.length_masks}")
         self.mask_padding = mask_padding
 
     def __len__(self):
@@ -62,18 +63,18 @@ class InpaintingDataset(torch.utils.data.Dataset):
         return masked_image, add_padding_to_mask(mask, self.mask_padding), input_image, mask 
 
 # Load Dataset: prepara DataLoader para el batch training. INPUT are resized to (3, img_size, img_size)
-def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, mask_padding=10, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
+def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask_padding=10, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
 
     assert abs((train_ratio + val_ratio + test_ratio) - 1) < 1e-5, "The sum of train_ratio, val_ratio, and test_ratio must be equal to 1."
 
-    images_transforms = transforms.Compose([
+    images_transforms_random_crop = transforms.Compose([
         transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.RandomCrop(img_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
 
-    masks_transforms = transforms.Compose([
+    masks_transforms_random_crop = transforms.Compose([
         transforms.Resize(img_size),
         transforms.RandomCrop(img_size),
         transforms.ToTensor()
@@ -83,15 +84,16 @@ def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, mask_padding
         inputs_dir=inputs_dir,
         masks_dir=masks_dir,
         mask_padding=mask_padding,
-        image_transforms=images_transforms,
-        masks_transforms=masks_transforms
+        image_transforms=images_transforms_random_crop,
+        masks_transforms=masks_transforms_random_crop,
+        logger=logger
     )
     
     dataset_size = len(full_dataset)
     train_size = int(train_ratio * dataset_size)
     val_size = int(val_ratio * dataset_size)
     test_size = dataset_size - train_size - val_size
-    print(f"Train size: {train_size}, Validation size: {val_size}, Test size: {test_size}")
+    logger.info(f"Train size: {train_size}, Validation size: {val_size}, Test size: {test_size}")
 
     train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
         full_dataset,
@@ -99,11 +101,34 @@ def load_dataset(inputs_dir, masks_dir, batch_size=4, img_size=512, mask_padding
         generator=torch.Generator().manual_seed(seed)
     )
 
+    # Create a small dataset with just the first image for sampling/testing
+    images_transforms_center_crop = transforms.Compose([
+        transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.CenterCrop(img_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
+
+    masks_transforms_center_crop = transforms.Compose([
+        transforms.Resize(img_size),
+        transforms.CenterCrop(img_size),
+        transforms.ToTensor()
+    ])
+    sampling_dataset = InpaintingDataset(
+        inputs_dir="./back/data/singleImageDataset/emptyRoom",
+        masks_dir="./back/data/singleImageDataset/emptyMask",
+        mask_padding=mask_padding,
+        image_transforms=images_transforms_center_crop,
+        masks_transforms=masks_transforms_center_crop,
+        logger=logger
+    )
+
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    sampling_loader = torch.utils.data.DataLoader(sampling_dataset, batch_size=1, shuffle=False)
 
-    return train_loader, val_loader, test_loader
+    return train_loader, val_loader, test_loader, sampling_loader
 
 # Merge Inputs and Masks: combina img de habitación vacia con mascara de habitación vacia
 def merge_image_with_mask(input_image, mask_image):
