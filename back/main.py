@@ -184,7 +184,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
     # Configurar LoRA en U-Net
     lora_target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
-    lora_dropout = 0.1
+    lora_dropout = 0
     unet_lora_config = LoraConfig(
         r=lora_rank,
         lora_alpha=lora_alpha,
