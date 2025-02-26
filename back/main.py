@@ -156,6 +156,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     
     # Determinar el tipo de dato
     torch_dtype = torch.float32 if dtype == "float32" else torch.float16
+    logger.info(f"Base torch_dtype: {torch_dtype}")  # Debug Mark 1: Base dtype
     num_images = len(train_loader.dataset)
 
     # Archivo para guardar métricas de entrenamiento
@@ -183,6 +184,10 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     unet.to(device, dtype=torch_dtype)
     vae.to(device, dtype=torch_dtype)
     text_encoder.to(device, dtype=torch_dtype)
+    
+    # Debug Mark 2: Check model weights dtype
+    logger.info(f"UNet parameter dtype: {next(unet.parameters()).dtype}")
+    logger.info(f"VAE parameter dtype: {next(vae.parameters()).dtype}")
 
     # Configurar LoRA en U-Net
     lora_target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
@@ -260,6 +265,11 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             input_masks = input_masks.to(device, dtype=torch_dtype)
             targets = targets.to(device, dtype=torch_dtype)
             unpadded_masks = unpadded_masks.to(device, dtype=torch_dtype)
+            
+            # Debug Mark 3: Check input tensor dtypes
+            logger.info(f"input_images dtype: {input_images.dtype}")
+            logger.info(f"input_masks dtype: {input_masks.dtype}")
+            logger.info(f"targets dtype: {targets.dtype}")
 
             # Codificar con VAE
             # https://github.com/huggingface/diffusers/blob/main/examples/research_projects/dreambooth_inpaint/train_dreambooth_inpaint_lora.py
@@ -267,6 +277,9 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             # originaly named "latents" in train_dreambooth_inpaint_lora.py, here I used "target_latents" to make it more clear
             target_latents = vae.encode(targets.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor
             masked_latents = vae.encode(input_images.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor         
+
+            # Debug Mark 4: Check latent dtypes
+            logger.info(f"target_latents dtype: {target_latents.dtype}")
 
             # Redimensionar la máscara a la resolución latente
             mask = torch.stack([
@@ -340,7 +353,10 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
                     else:
                         raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-                    loss = F.mse_loss(noise_pred.float(), target_noise.float(), reduction="mean")
+                    loss = F.mse_loss(noise_pred, target_noise, reduction="mean")
+
+                # Debug Mark 6: Check loss dtype
+                logger.info(f"loss dtype: {loss.dtype}")
 
                 accelerator.backward(loss)
                 torch.nn.utils.clip_grad_norm_(lora_layers, max_norm=1.0)
