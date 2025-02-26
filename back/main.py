@@ -113,6 +113,7 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
                             mask_image=input_masks[idx],
                             prompt=EMPTY_ROOM_PROMPT,
                             num_inference_steps=20,
+                            guidance_scale=args.guidance_scale,
                         ).images
 
                     current_psnr = calculate_psnr(inferred_image, target_images[idx])
@@ -150,8 +151,9 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
 def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, train_dir, 
                num_epochs=5, lr=1e-5, img_size=512, dtype="float32", 
-               save_latent_representations=False, lora_rank=16, lora_alpha=32, timestamp=None):
-
+               save_latent_representations=False, lora_rank=32, lora_alpha=16, lora_dropout=0.1,
+               lora_target_modules=["to_k", "to_q", "to_v", "to_out.0"], timestamp=None):
+    
     # Determinar el tipo de dato
     torch_dtype = torch.float32 if dtype == "float32" else torch.float16
     num_images = len(train_loader.dataset)
@@ -224,7 +226,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     optimizer = torch.optim.AdamW(lora_layers, lr=lr)
 
 
-        # Integrar Accelerate
+    # Integrar Accelerate
     from accelerate import Accelerator
     accelerator = Accelerator()
     unet, optimizer, train_loader = accelerator.prepare(
@@ -361,16 +363,16 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         current_lr = optimizer.param_groups[0]['lr']
         wandb.log({"learning_rate": current_lr, "epoch": epoch + 1})
 
-        # Llamar a la función de sample cada 10 épocas
-        unet.eval()
-        if (epoch + 1) % max(1, num_epochs // 5) == 0:
+        if (epoch + 1) % max(1, num_epochs // 10) == 0:
+            unet.eval()
             # Aquí usamos train_loader (o test_loader) para las muestras
             psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, epoch, train_dir)
             accelerator.print(f"Epoch {epoch+1} - Saved samples, PSNR: {psnr}")
-        unet.train()
+            unet.train()
 
         # Registrar métricas en CSV (ajusta PSNR si lo calculas)
         with open(metrics_log_file, "a") as f:
+            wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr, "epoch": epoch + 1})
             logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
             f.write(f"{epoch},{avg_epoch_loss},{psnr if 'psnr' in locals() else 0}\n")
 
@@ -399,7 +401,10 @@ def read_parameters():
     parser.add_argument("--lora-alpha", type=int, default=128, help="Alpha scaling factor for LoRA layers")
     parser.add_argument("--initial-learning-rate", type=float, default=1e-5, help="Learning rate for training")
     parser.add_argument("--lr-scheduler", type=str, default="constant", help=('The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"]'),)
-
+    parser.add_argument("--lora-dropout", type=float, default=0.1, help="Dropout probability for LoRA layers (default: 0.1)")
+    parser.add_argument("--lora-target-modules", type=str, nargs='+', default=["to_k", "to_q", "to_v", "to_out.0"], help="Target modules for LoRA adaptation")
+    parser.add_argument("--guidance-scale", type=float, default=1, help="Guidance scale for inpainting")
+    
     args = parser.parse_args()
 
     return args
@@ -455,7 +460,13 @@ def main():
         "img_size": args.img_size, 
         "dtype": args.dtype, 
         "lora_rank": args.lora_rank, 
-        "lora_alpha": args.lora_alpha})
+        "lora_alpha": args.lora_alpha,
+        "l_rank": args.lora_rank, 
+        "l_alpha": args.lora_alpha,
+        "l_dropout": args.lora_dropout,
+        "l_modules": args.lora_target_modules,
+        "guidance_scale": args.guidance_scale,
+        "lr_scheduler": args.lr_scheduler,})
 
     train_lora(model_id, 
                train_loader, 
@@ -463,12 +474,14 @@ def main():
                val_loader, 
                sampling_loader,
                num_epochs=args.epochs,
-               lr=args.initial_learning_rate, 
+               lr=args.initial_learning_rate,
                train_dir=train_dir,
                img_size=args.img_size, 
                save_latent_representations=args.save_latent_representations,
                lora_rank=args.lora_rank,
                lora_alpha=args.lora_alpha,
+               lora_dropout=args.lora_dropout,
+               lora_target_modules=args.lora_target_modules,
                dtype=args.dtype,
                timestamp=timestamp)
 
