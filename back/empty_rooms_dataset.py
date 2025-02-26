@@ -72,7 +72,7 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         transforms.RandomCrop(img_size),                                                        # Corta una región de 512x512
         transforms.ToTensor(),                                                                  # Convierte a tensor: [3, 512, 512] y escala los píxeles a [0,1]
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])                         # Normaliza a [-1,1]
-    ])                                                                                                                          #Resultado: Tensor de forma [3, 512, 512], tipo torch.float32, con valores en [-1, 1].
+    ])                                                                                          # Resultado: Tensor de forma [3, 512, 512], tipo torch.float32, con valores en [-1, 1].
 
     masks_transforms_random_crop = transforms.Compose([
         transforms.Resize(img_size),
@@ -80,6 +80,7 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         transforms.ToTensor()
     ])
 
+    # Create the full dataset with the new transforms
     full_dataset = InpaintingDataset(
         inputs_dir=inputs_dir,
         masks_dir=masks_dir,
@@ -89,6 +90,7 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         logger=logger
     )
     
+    # Rest of the function remains the same...
     dataset_size = len(full_dataset)
     train_size = int(train_ratio * dataset_size)
     val_size = int(val_ratio * dataset_size)
@@ -123,6 +125,7 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         logger=logger
     )
 
+    # Create the data loaders
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
