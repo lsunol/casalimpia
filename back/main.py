@@ -240,8 +240,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         args.lr_scheduler,
         optimizer=optimizer,
         num_warmup_steps=int(len(train_loader) * num_epochs * 0.1),  # 10% of total steps as warmup
-        num_training_steps=len(train_loader) * num_epochs,
-        # num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_training_steps=len(train_loader) * num_epochs * accelerator.num_processes,
     )
 	
     # Noise scheduler para la difusión
