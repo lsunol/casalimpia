@@ -156,7 +156,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     
     # Determinar el tipo de dato
     torch_dtype = torch.float32 if dtype == "float32" else torch.float16
-    logger.info(f"Base torch_dtype: {torch_dtype}")  # Debug Mark 1: Base dtype
     num_images = len(train_loader.dataset)
 
     # Archivo para guardar métricas de entrenamiento
@@ -189,9 +188,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     vae.to(device, dtype=torch_dtype)
     text_encoder.to(device, dtype=torch_dtype)
     
-    # Debug Mark 2: Check model weights dtype
-    logger.info(f"UNet parameter dtype: {next(unet.parameters()).dtype}")
-    logger.info(f"VAE parameter dtype: {next(vae.parameters()).dtype}")
 
     # Configurar LoRA en U-Net
     lora_target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
@@ -246,13 +242,16 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     scaler = GradScaler()
 
     
-    lr_scheduler = get_scheduler(
-        args.lr_scheduler,
-        optimizer=optimizer,
-        num_warmup_steps=int(len(train_loader) * num_epochs * 0.1),  # 10% of total steps as warmup
-        num_training_steps=len(train_loader) * num_epochs * accelerator.num_processes,
+    # Scheduler OneCycleLR (LR sube hasta 1e-3 y luego decae)
+    total_steps = num_epochs * len(train_loader)
+    lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=1e-3,
+        total_steps=total_steps,
+        pct_start=0.3,
+        anneal_strategy='linear'
     )
-	
+   
     
 
     # Noise scheduler para la difusión
@@ -273,15 +272,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             targets = targets.to(device, dtype=torch_dtype)
             unpadded_masks = unpadded_masks.to(device, dtype=torch_dtype)
             
-            # Check inputs for NaN
-            logger.info(f"input_images has NaN: {torch.isnan(input_images).any()}")
-            logger.info(f"input_masks has NaN: {torch.isnan(input_masks).any()}")
-            logger.info(f"targets has NaN: {torch.isnan(targets).any()}")
-            
-            # Debug Mark 3: Check input tensor dtypes
-            logger.info(f"input_images dtype: {input_images.dtype}")
-            logger.info(f"input_masks dtype: {input_masks.dtype}")
-            logger.info(f"targets dtype: {targets.dtype}")
+
 
             # Codificar con VAE
             # https://github.com/huggingface/diffusers/blob/main/examples/research_projects/dreambooth_inpaint/train_dreambooth_inpaint_lora.py
@@ -290,9 +281,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             target_latents = vae.encode(targets.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor
             masked_latents = vae.encode(input_images.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor         
 
-            # Debug Mark 4: Check latent dtypes
-            logger.info(f"target_latents dtype: {target_latents.dtype}")
-            logger.info(f"target_latents has NaN: {torch.isnan(target_latents).any()}")
 
             # Redimensionar la máscara a la resolución latente
             mask = torch.stack([
@@ -303,7 +291,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
             # Sample noise that we'll add to the latents
             noise = torch.randn_like(target_latents)
-            logger.info(f"noise has NaN: {torch.isnan(noise).any()}")
             bsz = target_latents.shape[0]
 
             # Sample a random timestep for each image
@@ -312,7 +299,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             # Add noise to the latents according to the noise magnitude at each timestep
             # (forward diffusion process)
             noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps)
-            logger.info(f"noisy_latents has NaN: {torch.isnan(noisy_latents).any()}")
             
             # Concatenar: [B, 9, 64, 64]
             latent_model_input = torch.cat([noisy_latents, mask, masked_latents], dim=1)
@@ -359,12 +345,10 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             with accelerator.accumulate(unet):
                 with autocast(device_type="cuda", enabled=(dtype=="float16")):
                     noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
-                    logger.info(f"noise_pred has NaN: {torch.isnan(noise_pred).any()}") 
 
                     # Determinar el target según el tipo de predicción
                     if noise_scheduler.config.prediction_type == "epsilon":
                         target_noise = noise
-                        logger.info(f"target_noise dtype: {target_noise.dtype}, has NaN: {torch.isnan(target_noise).any()}")
                     elif noise_scheduler.config.prediction_type == "v_prediction":
                         target_noise = noise_scheduler.get_velocity(target_latents, noise, timesteps)
                     else:
@@ -372,9 +356,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
                     loss = F.mse_loss(noise_pred, target_noise, reduction="mean")
                 
-                # Debug Mark 6: Check loss dtype
-                logger.info(f"loss dtype: {loss.dtype}")
-                logger.info(f"Loss dtype: {loss.dtype}, is NaN: {torch.isnan(loss)}, value: {loss.item()}")
+
                 
                 accelerator.backward(loss)
                 torch.nn.utils.clip_grad_norm_(lora_layers, max_norm=1.0)
