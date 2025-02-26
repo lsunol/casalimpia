@@ -166,3 +166,9 @@ cython_debug/
 **/lora_weights/
 **/lora_weights/*
 **/lora_trains/*
+.lprof/settings.json
+wandb/*
+
+back/data/automaticMasks_new/
+
+back/data/emptyRooms_new/
