@@ -150,7 +150,7 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
 
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
 def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, train_dir, 
-               num_epochs=5, lr=1e-5, img_size=512, dtype="float32", 
+               num_epochs=5, lr=1e-4, img_size=512, dtype="float32", 
                save_latent_representations=False, lora_rank=32, lora_alpha=16, lora_dropout=0.1,
                lora_target_modules=["to_k", "to_q", "to_v", "to_out.0"], timestamp=None):
     
@@ -191,7 +191,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
     # Configurar LoRA en U-Net
     lora_target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
-    lora_dropout = 0.1
+    #lora_dropout = 0.1                                                          #RESIGNACIÓN DEL VALOR QUE BORRA EL ARG
     unet_lora_config = LoraConfig(
         r=lora_rank,
         lora_alpha=lora_alpha,
@@ -241,7 +241,15 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     # GradScaler para mixed precision (si dtype == "float16")
     scaler = GradScaler()
 
-    
+
+    """
+    # Scheduler ConstantLR (mantiene lr constante)
+    lr_scheduler = torch.optim.lr_scheduler.ConstantLR(
+        optimizer,
+        factor=1.0,  # Multiplicador del lr inicial (1.0 = sin cambio)
+        total_iters=num_epochs * len(train_loader)  # Total de pasos (opcional, no afecta aquí)
+    )
+
     # Scheduler OneCycleLR (LR sube hasta 1e-3 y luego decae)
     total_steps = num_epochs * len(train_loader)
     lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -250,6 +258,15 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         total_steps=total_steps,
         pct_start=0.3,
         anneal_strategy='linear'
+    )
+    """
+    # Scheduler Cosine con warmup
+    total_steps = num_epochs * len(train_loader)
+    lr_scheduler = get_scheduler(
+        "cosine",
+        optimizer=optimizer,
+        num_warmup_steps=int(total_steps * 0.1),  # 10% de pasos para warmup
+        num_training_steps=total_steps
     )
    
     
@@ -264,8 +281,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         unet.train()
         epoch_loss = 0.0
 
-        for input_images, input_masks, targets, unpadded_masks in tqdm(sampling_loader):
-
+        #for input_images, input_masks, targets, unpadded_masks in tqdm(sampling_loader):                #Aqui se coje la img de sampling
+        for input_images, input_masks, targets, unpadded_masks in tqdm(train_loader):
             # Move to device
             input_images = input_images.to(device, dtype=torch_dtype)
             input_masks = input_masks.to(device, dtype=torch_dtype)
