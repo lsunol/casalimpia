@@ -150,7 +150,7 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
 
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
 def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, train_dir, 
-               num_epochs=5, lr=1e-5, img_size=512, dtype="float32", 
+               num_epochs=5, lr=1e-4, img_size=512, dtype="float32", 
                save_latent_representations=False, lora_rank=32, lora_alpha=16, lora_dropout=0.1,
                lora_target_modules=["to_k", "to_q", "to_v", "to_out.0"], timestamp=None):
     
@@ -173,6 +173,10 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     text_encoder = CLIPTextModel.from_pretrained(model_id, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(model_id, subfolder="unet")
+   
+    # Load UNet and force float32
+    unet = UNet2DConditionModel.from_pretrained(model_id, subfolder="unet").to(device, dtype=torch.float32)
+    logger.info(f"UNet forced dtype: {next(unet.parameters()).dtype}")  # Confirm float32
 
     # Congelar gradientes para VAE, text encoder y U-Net (se entrena solo LoRA)
     vae.requires_grad_(False)
@@ -180,9 +184,10 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     unet.requires_grad_(False)
 
     # Enviar modelos a GPU y configurar tipo de dato
-    unet.to(device, dtype=torch_dtype)
+    unet.to(device, dtype=torch.float32)                    #PUSE UNET EN 32
     vae.to(device, dtype=torch_dtype)
     text_encoder.to(device, dtype=torch_dtype)
+    
 
     # Configurar LoRA en U-Net
     lora_target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
@@ -235,13 +240,36 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     # GradScaler para mixed precision (si dtype == "float16")
     scaler = GradScaler()
 
-    lr_scheduler = get_scheduler(
-        args.lr_scheduler,
-        optimizer=optimizer,
-        num_warmup_steps=int(len(train_loader) * num_epochs * 0.1),  # 10% of total steps as warmup
-        num_training_steps=len(train_loader) * num_epochs * accelerator.num_processes,
+
+    """
+    # Scheduler ConstantLR (mantiene lr constante)
+    lr_scheduler = torch.optim.lr_scheduler.ConstantLR(
+        optimizer,
+        factor=1.0,  # Multiplicador del lr inicial (1.0 = sin cambio)
+        total_iters=num_epochs * len(train_loader)  # Total de pasos (opcional, no afecta aquí)
     )
-	
+
+    # Scheduler OneCycleLR (LR sube hasta 1e-3 y luego decae)
+    total_steps = num_epochs * len(train_loader)
+    lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=1e-3,
+        total_steps=total_steps,
+        pct_start=0.3,
+        anneal_strategy='linear'
+    )
+    """
+    # Scheduler Cosine con warmup
+    total_steps = num_epochs * len(train_loader)
+    lr_scheduler = get_scheduler(
+        "cosine",
+        optimizer=optimizer,
+        num_warmup_steps=int(total_steps * 0.1),  # 10% de pasos para warmup
+        num_training_steps=total_steps
+    )
+   
+    
+
     # Noise scheduler para la difusión
     noise_scheduler = DDPMScheduler.from_pretrained(model_id, subfolder="scheduler")    
 
@@ -252,13 +280,15 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         unet.train()
         epoch_loss = 0.0
 
-        for input_images, input_masks, targets, unpadded_masks in tqdm(sampling_loader):
-
+        #for input_images, input_masks, targets, unpadded_masks in tqdm(sampling_loader):                #Aqui se coje la img de sampling
+        for input_images, input_masks, targets, unpadded_masks in tqdm(train_loader):
             # Move to device
             input_images = input_images.to(device, dtype=torch_dtype)
             input_masks = input_masks.to(device, dtype=torch_dtype)
             targets = targets.to(device, dtype=torch_dtype)
             unpadded_masks = unpadded_masks.to(device, dtype=torch_dtype)
+            
+
 
             # Codificar con VAE
             # https://github.com/huggingface/diffusers/blob/main/examples/research_projects/dreambooth_inpaint/train_dreambooth_inpaint_lora.py
@@ -266,6 +296,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             # originaly named "latents" in train_dreambooth_inpaint_lora.py, here I used "target_latents" to make it more clear
             target_latents = vae.encode(targets.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor
             masked_latents = vae.encode(input_images.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor         
+
 
             # Redimensionar la máscara a la resolución latente
             mask = torch.stack([
@@ -284,7 +315,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             # Add noise to the latents according to the noise magnitude at each timestep
             # (forward diffusion process)
             noisy_latents = noise_scheduler.add_noise(target_latents, noise, timesteps)
-
+            
             # Concatenar: [B, 9, 64, 64]
             latent_model_input = torch.cat([noisy_latents, mask, masked_latents], dim=1)
 
@@ -339,8 +370,10 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
                     else:
                         raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
-                    loss = F.mse_loss(noise_pred.float(), target_noise.float(), reduction="mean")
+                    loss = F.mse_loss(noise_pred, target_noise, reduction="mean")
+                
 
+                
                 accelerator.backward(loss)
                 torch.nn.utils.clip_grad_norm_(lora_layers, max_norm=1.0)
                 optimizer.step()
