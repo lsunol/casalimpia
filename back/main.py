@@ -152,11 +152,10 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
 def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, train_dir, 
                num_epochs=5, lr=1e-5, img_size=512, dtype="float32", 
                save_latent_representations=False, lora_rank=32, lora_alpha=16, lora_dropout=0.1,
-               lora_target_modules=["to_k", "to_q", "to_v", "to_out.0"], timestamp=None):
+               lora_target_modules=["to_k", "to_q", "to_v", "to_out.0"], overfitting=False, timestamp=None):
     
     # Determinar el tipo de dato
     torch_dtype = torch.float32 if dtype == "float32" else torch.float16
-    num_images = len(train_loader.dataset)
 
     # Archivo para guardar métricas de entrenamiento
     metrics_log_file = os.path.join(train_dir, "training_metrics.csv")
@@ -194,24 +193,11 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         lora_dropout=lora_dropout,
     )
 
-    # Guardar config usada
-    config_used = {
-        "model_id": model_id,
-        "num_epochs": num_epochs,
-        "num_images": num_images,
-        "lr_scheduler": args.lr_scheduler,
-        "lr": lr,
-        "img_size": img_size,
-        "dtype": dtype,
-        "lora_rank": lora_rank,
-        "lora_alpha": lora_alpha,
-        "lora_target_modules": lora_target_modules,
-        "lora_dropout": lora_dropout,
-        "save_latent_representations": save_latent_representations,
-        "timestamp": timestamp
-    }
-    with open(os.path.join(train_dir, "config_used.json"), "w") as file:
-        json.dump(config_used, file, indent=4)
+    if (overfitting):
+        train_loader = sampling_loader
+        wandb_run.tags = wandb_run.tags + ("OVERFITTING",)
+
+    wandb.config.update({"num_images": len(train_loader.dataset)})
 
     # Agregar adaptadores LoRA
     unet.add_adapter(unet_lora_config)
@@ -252,7 +238,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         unet.train()
         epoch_loss = 0.0
 
-        for input_images, input_masks, targets, unpadded_masks in tqdm(sampling_loader):
+        for input_images, input_masks, targets, unpadded_masks in tqdm(train_loader):
 
             # Move to device
             input_images = input_images.to(device, dtype=torch_dtype)
@@ -402,6 +388,9 @@ def read_parameters():
     parser.add_argument("--lora-dropout", type=float, default=0.1, help="Dropout probability for LoRA layers (default: 0.1)")
     parser.add_argument("--lora-target-modules", type=str, nargs='+', default=["to_k", "to_q", "to_v", "to_out.0"], help="Target modules for LoRA adaptation")
     parser.add_argument("--guidance-scale", type=float, default=1, help="Guidance scale for inpainting")
+    parser.add_argument("--overfitting", action='store_true', help="Enable overfitting mode")
+    parser.add_argument("--no-overfitting", dest="overfitting", action='store_false', help="Disable overfitting mode")
+    parser.set_defaults(overfitting=False)
     
     args = parser.parse_args()
 
@@ -424,13 +413,12 @@ logging.basicConfig(
     )
 
 logger = logging.getLogger()
+wandb_run = wandb.init(project="casalimpia", tags=[])
 
 # Main Function
 def main():
     
     initial_timestamp = datetime.now()
-
-    wandb.init(project="casalimpia")
 
     logger.info("Start training")
 
@@ -451,9 +439,9 @@ def main():
     wandb.run.name = f"{args.epochs:03d}_epochs_{len(train_loader.dataset):04d}_images_{args.lora_rank:03d}_rank_{args.lora_alpha:03d}_alpha"
     wandb.config.update({
         "model": model_id,
+        "epochs": args.epochs, 
         "num_epochs": args.epochs, 
         "batch_size": args.batch_size,
-        "num_images": len(train_loader.dataset), 
         "initial_lr": args.initial_learning_rate, 
         "img_size": args.img_size, 
         "dtype": args.dtype, 
@@ -464,7 +452,8 @@ def main():
         "l_dropout": args.lora_dropout,
         "l_modules": args.lora_target_modules,
         "guidance_scale": args.guidance_scale,
-        "lr_scheduler": args.lr_scheduler,})
+        "lr_scheduler": args.lr_scheduler,
+        "overfitting": args.overfitting,})
 
     train_lora(model_id, 
                train_loader, 
@@ -481,6 +470,7 @@ def main():
                lora_dropout=args.lora_dropout,
                lora_target_modules=args.lora_target_modules,
                dtype=args.dtype,
+               overfitting=args.overfitting,
                timestamp=timestamp)
 
     final_timestamp = datetime.now()
