@@ -6,47 +6,32 @@ import logging
 import wandb
 from datetime import datetime
 from image_service import save_image
-
 from accelerate import Accelerator
 from diffusers.optimization import get_scheduler
-
-
 # Manipulación de imágenes y datos
 import numpy as np
-
-
 # PyTorch y torchvision
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torchvision import transforms
-
 # Hugging Face y Diffusers
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionInpaintPipeline, UNet2DConditionModel
-from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_xformers_available
 
 from diffusers.optimization import get_scheduler  # Optimizadores personalizados
 from diffusers.utils import check_min_version, is_xformers_available  # Verificación de versiones y optimización de memoria
-
-
 # Transformers (Hugging Face)
 from transformers import CLIPTextModel
-
 # PEFT (Parameter-Efficient Fine-Tuning)
 from peft import LoraConfig
-
 # Hugging Face Hub
 from huggingface_hub import create_repo, upload_folder  # Funcionalidades para subir modelos al Hub
-
 # Progreso y logging
 from tqdm import tqdm
-
-
 # Módulos personalizados
 from empty_rooms_dataset import load_dataset  # Carga del dataset de habitaciones vacías
 from image_service import save_epoch_sample  # Servicio para guardar ejemplos durante el entrenamiento
-
 from torch.amp import GradScaler, autocast
 from metrics import calculate_psnr
 
@@ -82,6 +67,14 @@ EMPTY_ROOM_PROMPT = [
     "Fill in the missing areas with structural background only, preserving the room's geometry. Do not generate furniture, decorations, or any identifiable objects. Maintain a uniform surface for walls, floors, and ceilings, blending seamlessly with the existing structure."
 ]
 
+DEBUG_MODE = False
+# Función de ayuda para loguear mensajes de debug
+def debug_log(message: str):
+    """Imprime mensaje de debug si DEBUG_MODE está activo."""
+    if DEBUG_MODE:
+        logger.info(message)
+
+
 # Generación de ejemplos después de cada época de entrenamiento
 # Add this new function after setup_model_with_lora and before train_lora
 def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir):
@@ -112,7 +105,7 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
                             image=input_images[idx],
                             mask_image=input_masks[idx],
                             prompt=EMPTY_ROOM_PROMPT,
-                            num_inference_steps=20,
+                            num_inference_steps=30,
                             guidance_scale=args.guidance_scale,
                         ).images
 
@@ -152,10 +145,11 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
 def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, train_dir, 
                num_epochs=5, lr=1e-4, img_size=512, dtype="float32", 
                save_latent_representations=False, lora_rank=32, lora_alpha=16, lora_dropout=0.1,
-               lora_target_modules=["to_k", "to_q", "to_v", "to_out.0"], overfitting=False, timestamp=None):
+               lora_target_modules=["to_k", "to_q", "to_v", "to_out.0"], overfitting=False, optimizer_type="AdamW", timestamp=None):
     
     # Determinar el tipo de dato
     torch_dtype = torch.float32 if dtype == "float32" else torch.float16
+    debug_log(f"Base torch_dtype: {torch_dtype}")
 
     # Archivo para guardar métricas de entrenamiento
     metrics_log_file = os.path.join(train_dir, "training_metrics.csv")
@@ -169,24 +163,20 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     pipe.set_progress_bar_config(disable=True)
 
     # Cargar componentes: text encoder, VAE y U-Net
-    text_encoder = CLIPTextModel.from_pretrained(model_id, subfolder="text_encoder")
-    vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae")
-    unet = UNet2DConditionModel.from_pretrained(model_id, subfolder="unet")
-   
-    # Load UNet and force float32
+    text_encoder = CLIPTextModel.from_pretrained(model_id, subfolder="text_encoder").to(device, dtype=torch_dtype)
+    vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae").to(device, dtype=torch_dtype)
     unet = UNet2DConditionModel.from_pretrained(model_id, subfolder="unet").to(device, dtype=torch.float32)
-    logger.info(f"UNet forced dtype: {next(unet.parameters()).dtype}")  # Confirm float32
-
+    debug_log(f"UNet forced dtype: {next(unet.parameters()).dtype}")
+   
     # Congelar gradientes para VAE, text encoder y U-Net (se entrena solo LoRA)
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # Enviar modelos a GPU y configurar tipo de dato
-    unet.to(device, dtype=torch.float32)                    #PUSE UNET EN 32
-    vae.to(device, dtype=torch_dtype)
-    text_encoder.to(device, dtype=torch_dtype)
     
+    # Debug Mark 2: Check model weights dtype
+    debug_log(f"UNet parameter dtype: {next(unet.parameters()).dtype}")
+    debug_log(f"VAE parameter dtype: {next(vae.parameters()).dtype}")
 
     # Configurar LoRA en U-Net
     lora_target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
@@ -213,11 +203,21 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
     # Optimizador
     #optimizer = bnb.optim.Adam8bit(lora_layers, lr=lr)
-    optimizer = torch.optim.AdamW(lora_layers, lr=lr)
-
+    #optimizer = torch.optim.AdamW(lora_layers, lr=lr)
+    if optimizer_type == "AdamW":
+        optimizer = torch.optim.AdamW(lora_layers, lr=lr)
+    elif optimizer_type == "Adam":
+        optimizer = torch.optim.Adam(lora_layers, lr=lr)
+    elif optimizer_type == "SGD":
+        optimizer = torch.optim.SGD(lora_layers, lr=lr, momentum=0.9)
+    elif optimizer_type == "RMSprop":
+        optimizer = torch.optim.RMSprop(lora_layers, lr=lr)
+    elif optimizer_type == "Adagrad":
+        optimizer = torch.optim.Adagrad(lora_layers, lr=lr)
+    logger.info(f"Using optimizer: {optimizer_type}, LR: {lr}")
 
     # Integrar Accelerate
-    from accelerate import Accelerator
+    
     accelerator = Accelerator()
     unet, optimizer, train_loader = accelerator.prepare(
         unet, optimizer, train_loader
@@ -233,7 +233,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         factor=1.0,  # Multiplicador del lr inicial (1.0 = sin cambio)
         total_iters=num_epochs * len(train_loader)  # Total de pasos (opcional, no afecta aquí)
     )
-
+    
     # Scheduler OneCycleLR (LR sube hasta 1e-3 y luego decae)
     total_steps = num_epochs * len(train_loader)
     lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -244,29 +244,30 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         anneal_strategy='linear'
     )
     """
-    # Scheduler Cosine con warmup
     total_steps = num_epochs * len(train_loader)
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=int(total_steps * 0.1),  # 10% de pasos para warmup
+        num_warmup_steps=int(total_steps * 0.1) if args.lr_scheduler in ["cosine", "linear"] else 0,
         num_training_steps=total_steps
     )
+    debug_log(f"Scheduler: {args.lr_scheduler}, total_steps={total_steps}")
    
     # Noise scheduler para la difusión
     noise_scheduler = DDPMScheduler.from_pretrained(model_id, subfolder="scheduler")    
 
     first_time_ever = True
+    best_psnr = -float('inf')
+    patience = 50  # Número de épocas sin mejora antes de parar deberia de ser 50 en el caso del dataset de 13k. 10 para ser muy optimistas (solo 1 fallo
+    patience_counter = 0
+
     for epoch in range(num_epochs):
-
         logger.info(f"Epoch {epoch + 1}/{num_epochs}")
-
         unet.train()
-        epoch_loss = 0.0
+        train_epoch_loss = 0.0
+        logger.info(f"Training on {len(train_loader.dataset)} images, batches per epoch: {len(train_loader)} with overfitting={overfitting}")
 
         for input_images, input_masks, targets, unpadded_masks in tqdm(train_loader):
-
-            # Move to device
             input_images = input_images.to(device, dtype=torch_dtype)
             input_masks = input_masks.to(device, dtype=torch_dtype)
             targets = targets.to(device, dtype=torch_dtype)
@@ -274,7 +275,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             
             # Codificar con VAE
             # https://github.com/huggingface/diffusers/blob/main/examples/research_projects/dreambooth_inpaint/train_dreambooth_inpaint_lora.py
-
             # originaly named "latents" in train_dreambooth_inpaint_lora.py, here I used "target_latents" to make it more clear
             target_latents = vae.encode(targets.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor
             masked_latents = vae.encode(input_images.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor         
@@ -340,10 +340,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             
 			# Entrenamiento con acumulación de gradientes
             with accelerator.accumulate(unet):
-
                 with autocast(device_type="cuda", enabled=(dtype=="float16")):
                     noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
-
                     # Determinar el target según el tipo de predicción
                     if noise_scheduler.config.prediction_type == "epsilon":
                         target_noise = noise
@@ -363,35 +361,111 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             logger.info(f"Batch loss: {loss.item()} | Learning rate: {lr_scheduler.get_last_lr()[0]}")
             wandb.log({"batch_loss": loss.item(), "learning_rate": lr_scheduler.get_last_lr()[0], "epoch": epoch + 1})
 
-            epoch_loss += loss.item()
+            train_epoch_loss += loss.item()
 
         # Promedio de pérdida por época
-        avg_epoch_loss = epoch_loss / len(train_loader)
-        wandb.log({"epoch_loss": avg_epoch_loss, "psnr": psnr, "epoch": epoch + 1})
-        accelerator.print(f"Epoch {epoch + 1} Loss: {avg_epoch_loss}")
+        #avg_epoch_loss = train_epoch_loss / len(train_loader)
+        #wandb.log({"train_loss": avg_epoch_loss, "psnr": psnr, "epoch": epoch + 1})
+        avg_train_loss = train_epoch_loss / len(train_loader)
+        wandb.log({"train_loss": avg_train_loss, "epoch": epoch + 1})
+        
+        # Validation phase
+        unet.eval()
+        val_epoch_loss = 0.0
+        with torch.no_grad():
+            for val_input_images, val_input_masks, val_targets, val_unpadded_masks in val_loader:
+                val_input_images = val_input_images.to(device, dtype=torch_dtype)
+                val_input_masks = val_input_masks.to(device, dtype=torch_dtype)
+                val_targets = val_targets.to(device, dtype=torch_dtype)
+                val_unpadded_masks = val_unpadded_masks.to(device, dtype=torch_dtype)
 
+                val_target_latents = vae.encode(val_targets.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor
+                val_masked_latents = vae.encode(val_input_images.to(torch_dtype)).latent_dist.sample() * vae.config.scaling_factor
+
+                val_mask = torch.stack([torch.nn.functional.interpolate(m.unsqueeze(0), size=(img_size // 8, img_size // 8)) for m in val_input_masks]).to(torch_dtype)
+                val_mask = val_mask.reshape(-1, 1, img_size // 8, img_size // 8)
+
+                val_noise = torch.randn_like(val_target_latents)
+                val_bsz = val_target_latents.shape[0]
+                val_timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (val_bsz,), device=device).long()
+                val_noisy_latents = noise_scheduler.add_noise(val_target_latents, val_noise, val_timesteps)
+
+                val_latent_model_input = torch.cat([val_noisy_latents, val_mask, val_masked_latents], dim=1)
+                val_encoder_hidden_states = text_encoder(pipe.tokenizer([EMPTY_ROOM_PROMPT[0]] * val_bsz, return_tensors="pt", padding=True, truncation=True).input_ids.to(device))[0].to(torch_dtype)
+
+                with autocast(device_type="cuda", enabled=(dtype=="float16")):
+                    val_noise_pred = unet(val_latent_model_input, val_timesteps, val_encoder_hidden_states).sample
+                    if noise_scheduler.config.prediction_type == "epsilon":
+                        val_target_noise = val_noise
+                    val_loss = F.mse_loss(val_noise_pred, val_target_noise, reduction="mean")
+
+                val_epoch_loss += val_loss.item()
+
+        # Calculate average validation loss for the epoch
+        avg_val_loss = val_epoch_loss / len(val_loader)
+        wandb.log({"val_loss": avg_val_loss, "epoch": epoch + 1})
+
+
+
+        accelerator.print(f"Epoch {epoch + 1} Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
+        #accelerator.print(f"Epoch {epoch + 1} Loss: {avg_epoch_loss}")
+
+        #NEW ADD
+        psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, epoch, train_dir)
+        if psnr > best_psnr:
+            best_psnr = psnr
+            patience_counter = 0
+            unet.save_attn_procs(f"{train_dir}_best_lora_weights")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                accelerator.print(f"Early stopping at epoch {epoch+1}")
+                break
+
+        unet.train()
+
+        with open(metrics_log_file, "a") as f:
+            metrics = {"epoch_loss": avg_train_loss, "val_loss": avg_val_loss, "psnr": psnr, "epoch": epoch + 1}
+            wandb.log(metrics)
+            logger.info(f"Epoch Loss: {metrics['epoch_loss']:.4f} | Val Loss: {metrics['val_loss']:.4f} | PSNR: {metrics['psnr']}")
+            f.write(f"{epoch},{metrics['epoch_loss']:.4f},{metrics['val_loss']:.4f},{metrics['psnr']}\n")
+
+        """
         # LR actual
         current_lr = optimizer.param_groups[0]['lr']
         wandb.log({"learning_rate": current_lr, "epoch": epoch + 1})
 
         if (epoch + 1) % max(1, num_epochs // 10) == 0:
+        #if (epoch + 1) % 10 == 0:
             unet.eval()
-            # Aquí usamos train_loader (o test_loader) para las muestras
+                    # Aquí usamos train_loader (o test_loader) para las muestras
             psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, epoch, train_dir)
             accelerator.print(f"Epoch {epoch+1} - Saved samples, PSNR: {psnr}")
+            if psnr > best_psnr:
+                best_psnr = psnr
+                patience_counter = 0
+                # Opcional: guardar mejor modelo
+                unet.save_attn_procs(f"{train_dir}_best_lora_weights")
+            else:
+                patience_counter += 10
+                if patience_counter >= patience:
+                    accelerator.print(f"Early stopping at epoch {epoch+1}")
+                    break
             unet.train()
+            
 
         # Registrar métricas en CSV (ajusta PSNR si lo calculas)
         with open(metrics_log_file, "a") as f:
-            wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr, "epoch": epoch + 1})
-            logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
-            f.write(f"{epoch},{avg_epoch_loss},{psnr if 'psnr' in locals() else 0}\n")
-
+            metrics = {"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr if 'psnr' in locals() else 0, "epoch": epoch + 1}
+            wandb.log(metrics)
+            logger.info(f"Epoch Loss: {metrics['epoch_loss']} | PSNR: {metrics['psnr']}")
+            f.write(f"{epoch},{metrics['epoch_loss']},{metrics['psnr']}\n")
+"""
     # Final del entrenamiento
     accelerator.wait_for_everyone()
     accelerator.print("Training complete. Saving final LoRA weights...")
     unet = accelerator.unwrap_model(unet)
-    assert hasattr(unet, "peft_config"), "El modelo UNet no tiene configurado LoRA."
+    #assert hasattr(unet, "peft_config"), "El modelo UNet no tiene configurado LoRA."
     unet.save_attn_procs(f"{train_dir}_lora_weights", unet_lora_layers=pipe.unet.attn_processors)
 
 
@@ -410,13 +484,14 @@ def read_parameters():
     parser.add_argument("--dtype", type=str, choices=["float16", "float32"], default="float32", help="Data type for training: float16 or float32")
     parser.add_argument("--lora-rank", type=int, default=64, help="Rank for LoRA layers")
     parser.add_argument("--lora-alpha", type=int, default=128, help="Alpha scaling factor for LoRA layers")
-    parser.add_argument("--initial-learning-rate", type=float, default=1e-5, help="Learning rate for training")
+    parser.add_argument("--initial-learning-rate", type=float, default=1e-4, help="Learning rate for training")
     parser.add_argument("--lr-scheduler", type=str, default="constant", help=('The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"]'),)
     parser.add_argument("--lora-dropout", type=float, default=0.1, help="Dropout probability for LoRA layers (default: 0.1)")
     parser.add_argument("--lora-target-modules", type=str, nargs='+', default=["to_k", "to_q", "to_v", "to_out.0"], help="Target modules for LoRA adaptation")
     parser.add_argument("--guidance-scale", type=float, default=1, help="Guidance scale for inpainting")
     parser.add_argument("--overfitting", action='store_true', help="Enable overfitting mode")
     parser.add_argument("--no-overfitting", dest="overfitting", action='store_false', help="Disable overfitting mode")
+    parser.add_argument("--optimizer", type=str, default="AdamW", choices=["AdamW", "Adam", "SGD", "RMSprop", "Adagrad"], help="Optimizer algorithm")
     parser.set_defaults(overfitting=False)
     
     args = parser.parse_args()
@@ -480,7 +555,8 @@ def main():
         "l_modules": args.lora_target_modules,
         "guidance_scale": args.guidance_scale,
         "lr_scheduler": args.lr_scheduler,
-        "overfitting": args.overfitting,})
+        "overfitting": args.overfitting,
+        "optimizer": args.optimizer,})
 
     train_lora(model_id, 
                train_loader, 
@@ -498,6 +574,7 @@ def main():
                lora_target_modules=args.lora_target_modules,
                dtype=args.dtype,
                overfitting=args.overfitting,
+               optimizer_type=args.optimizer,
                timestamp=timestamp)
 
     final_timestamp = datetime.now()
