@@ -149,7 +149,7 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
 
 
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
-def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, train_dir, 
+def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, overfitting_loader, train_dir, 
                num_epochs=5, lr=1e-4, img_size=512, dtype="float32", 
                save_latent_representations=False, lora_rank=32, lora_alpha=16, lora_dropout=0.1,
                lora_target_modules=["to_k", "to_q", "to_v", "to_out.0"], overfitting=False, timestamp=None):
@@ -189,7 +189,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     
 
     # Configurar LoRA en U-Net
-    lora_target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
     unet_lora_config = LoraConfig(
         r=lora_rank,
         lora_alpha=lora_alpha,
@@ -199,7 +198,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     )
 
     if (overfitting):
-        train_loader = sampling_loader
+        train_loader = overfitting_loader
+        sampling_loader = overfitting_loader
         wandb_run.tags = wandb_run.tags + ("OVERFITTING",)
 
     wandb.config.update({"num_images": len(train_loader.dataset)})
@@ -449,7 +449,7 @@ def main():
 
     logger.info("Start training")
 
-    train_loader, val_loader, test_loader, sampling_loader = load_dataset(
+    train_loader, val_loader, test_loader, overfitting_loader, sampling_loader = load_dataset(
         inputs_dir=args.empty_rooms_dir, 
         masks_dir=args.masks_dir, 
         batch_size=args.batch_size, 
@@ -487,6 +487,7 @@ def main():
                test_loader, 
                val_loader, 
                sampling_loader,
+               overfitting_loader,
                num_epochs=args.epochs,
                lr=args.initial_learning_rate,
                train_dir=train_dir,
@@ -495,7 +496,7 @@ def main():
                lora_rank=args.lora_rank,
                lora_alpha=args.lora_alpha,
                lora_dropout=args.lora_dropout,
-               lora_target_modules=args.lora_target_modules,
+               lora_target_modules=args.lora_target_modules[0].split() if len(args.lora_target_modules) == 1 else args.lora_target_modules,
                dtype=args.dtype,
                overfitting=args.overfitting,
                timestamp=timestamp)
