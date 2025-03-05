@@ -80,9 +80,16 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         transforms.ToTensor()
     ])
 
+    # Check if inputs_dir contains required folders
+    required_folders = ['train', 'validation', 'test']
+    existing_folders = os.listdir(inputs_dir)
+    missing_folders = [folder for folder in required_folders if folder not in existing_folders]
+    if missing_folders:
+        raise ValueError(f"Missing required folders in {inputs_dir}: {', '.join(missing_folders)}")
+
     # Create the full dataset with the new transforms
-    full_dataset = InpaintingDataset(
-        inputs_dir=inputs_dir,
+    train_dataset = InpaintingDataset(
+        inputs_dir=inputs_dir + '/train',
         masks_dir=masks_dir,
         mask_padding=mask_padding,
         image_transforms=images_transforms_random_crop,
@@ -90,18 +97,25 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         logger=logger
     )
     
-    # Rest of the function remains the same...
-    dataset_size = len(full_dataset)
-    train_size = int(train_ratio * dataset_size)
-    val_size = int(val_ratio * dataset_size)
-    test_size = dataset_size - train_size - val_size
-    logger.info(f"Train size: {train_size}, Validation size: {val_size}, Test size: {test_size}")
-
-    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-        full_dataset,
-        [train_size, val_size, test_size], 
-        generator=torch.Generator().manual_seed(seed)
+    val_dataset = InpaintingDataset(
+        inputs_dir=inputs_dir + '/validation',
+        masks_dir=masks_dir,
+        mask_padding=mask_padding,
+        image_transforms=images_transforms_random_crop,
+        masks_transforms=masks_transforms_random_crop,
+        logger=logger
     )
+    
+    test_dataset = InpaintingDataset(
+        inputs_dir=inputs_dir + '/test',
+        masks_dir=masks_dir,
+        mask_padding=mask_padding,
+        image_transforms=images_transforms_random_crop,
+        masks_transforms=masks_transforms_random_crop,
+        logger=logger
+    )
+
+    logger.info(f"Train size: {len(train_dataset)}, Validation size: {len(val_dataset)}, Test size: {len(test_dataset)}")
 
     # Create a small dataset with just the first image for sampling/testing
     images_transforms_center_crop = transforms.Compose([
@@ -116,8 +130,18 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         transforms.CenterCrop(img_size),
         transforms.ToTensor()
     ])
-    sampling_dataset = InpaintingDataset(
+
+    overfitting_dataset = InpaintingDataset(
         inputs_dir="./back/data/singleImageDataset/emptyRoom",
+        masks_dir="./back/data/singleImageDataset/emptyMask",
+        mask_padding=mask_padding,
+        image_transforms=images_transforms_center_crop,
+        masks_transforms=masks_transforms_center_crop,
+        logger=logger
+    )
+
+    sampling_dataset = InpaintingDataset(
+        inputs_dir="./back/data/samplingDataset/",
         masks_dir="./back/data/singleImageDataset/emptyMask",
         mask_padding=mask_padding,
         image_transforms=images_transforms_center_crop,
@@ -129,9 +153,10 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    overfitting_loader = torch.utils.data.DataLoader(overfitting_dataset, batch_size=max(batch_size, len(overfitting_dataset)), shuffle=False)
     sampling_loader = torch.utils.data.DataLoader(sampling_dataset, batch_size=1, shuffle=False)
 
-    return train_loader, val_loader, test_loader, sampling_loader
+    return train_loader, val_loader, test_loader, overfitting_loader, sampling_loader
 
 # Merge Inputs and Masks: combina img de habitación vacia con mascara de habitación vacia
 def merge_image_with_mask(input_image, mask_image):
