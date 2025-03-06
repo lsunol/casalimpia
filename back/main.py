@@ -4,6 +4,9 @@ import os
 import json
 import logging
 import wandb
+from wandb import Artifact
+import time
+
 from datetime import datetime
 from image_service import save_image
 
@@ -82,6 +85,11 @@ EMPTY_ROOM_PROMPT = [
     "Fill in the missing areas with structural background only, preserving the room's geometry. Do not generate furniture, decorations, or any identifiable objects. Maintain a uniform surface for walls, floors, and ceilings, blending seamlessly with the existing structure."
 ]
 
+def upload_safetensors_to_wandb(file_path, artifact_name, artifact_type="model"):
+    artifact = Artifact(name=artifact_name, type=artifact_type)
+    artifact.add_file(file_path)
+    wandb.log_artifact(artifact)
+
 # Generación de ejemplos después de cada época de entrenamiento
 # Add this new function after setup_model_with_lora and before train_lora
 def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir):
@@ -112,7 +120,7 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
                             image=input_images[idx],
                             mask_image=input_masks[idx],
                             prompt=EMPTY_ROOM_PROMPT,
-                            num_inference_steps=20,
+                            num_inference_steps=args.inference_steps,
                             guidance_scale=args.guidance_scale,
                         ).images
 
@@ -151,7 +159,7 @@ def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir)
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
 def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, overfitting_loader, train_dir, 
                num_epochs=5, lr=1e-4, img_size=512, dtype="float32", 
-               save_latent_representations=False, lora_rank=32, lora_alpha=16, lora_dropout=0.1,
+               save_latent_representations=False, save_epoch_tensors=False, lora_rank=32, lora_alpha=16, lora_dropout=0.1,
                lora_target_modules=["to_k", "to_q", "to_v", "to_out.0"], overfitting=False, timestamp=None):
     
     # Determinar el tipo de dato
@@ -184,8 +192,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
     # Enviar modelos a GPU y configurar tipo de dato
     unet.to(device, dtype=torch.float32)                    #PUSE UNET EN 32
-    vae.to(device, dtype=torch_dtype)
-    text_encoder.to(device, dtype=torch_dtype)
+    vae.to(device, torch_dtype)
+    text_encoder.to(device, torch_dtype)
     
 
     # Configurar LoRA en U-Net
@@ -265,6 +273,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         epoch_loss = 0.0
 
         for input_images, input_masks, targets, unpadded_masks in tqdm(train_loader):
+            batch_start_time = time.time()  # Start timing the batch
 
             # Move to device
             input_images = input_images.to(device, dtype=torch_dtype)
@@ -360,8 +369,16 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
-            logger.info(f"Batch loss: {loss.item()} | Learning rate: {lr_scheduler.get_last_lr()[0]}")
-            wandb.log({"batch_loss": loss.item(), "learning_rate": lr_scheduler.get_last_lr()[0], "epoch": epoch + 1})
+            batch_end_time = time.time()  # End timing the batch
+            batch_time = batch_end_time - batch_start_time
+            
+            logger.info(f"Batch loss: {loss.item()} | Learning rate: {lr_scheduler.get_last_lr()[0]} | Batch time: {batch_time:.2f}s")
+            wandb.log({
+                "batch_loss": loss.item(), 
+                "learning_rate": lr_scheduler.get_last_lr()[0],
+                "batch_processing_time": batch_time,
+                "epoch": epoch + 1
+            })
 
             epoch_loss += loss.item()
 
@@ -381,18 +398,31 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             accelerator.print(f"Epoch {epoch+1} - Saved samples, PSNR: {psnr}")
             unet.train()
 
+        wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr, "epoch": epoch + 1})
+        logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
         # Registrar métricas en CSV (ajusta PSNR si lo calculas)
         with open(metrics_log_file, "a") as f:
-            wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr, "epoch": epoch + 1})
-            logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
             f.write(f"{epoch},{avg_epoch_loss},{psnr if 'psnr' in locals() else 0}\n")
+
+        # Save LoRA weights at the end of each epoch
+        if save_epoch_tensors:
+            accelerator.wait_for_everyone()
+            unet = accelerator.unwrap_model(unet)
+            epoch_weights_path = f"{train_dir}lora_weights_epoch_{epoch + 1}"
+            unet.save_attn_procs(epoch_weights_path, unet_lora_layers=pipe.unet.attn_processors)
+            
+            # Upload safetensors to wandb if they exist
+            upload_safetensors_to_wandb(f"{epoch_weights_path}/pytorch_lora_weights.safetensors", f"lora_weights_epoch_{epoch + 1}")
 
     # Final del entrenamiento
     accelerator.wait_for_everyone()
     accelerator.print("Training complete. Saving final LoRA weights...")
     unet = accelerator.unwrap_model(unet)
-    assert hasattr(unet, "peft_config"), "El modelo UNet no tiene configurado LoRA."
-    unet.save_attn_procs(f"{train_dir}_lora_weights", unet_lora_layers=pipe.unet.attn_processors)
+    final_weights_path = f"{train_dir}final_lora_weights"
+    unet.save_attn_procs(final_weights_path, unet_lora_layers=pipe.unet.attn_processors)
+    
+    # Upload final safetensors to wandb
+    upload_safetensors_to_wandb(f"{final_weights_path}/pytorch_lora_weights.safetensors", "final_lora_weights")
 
 
 # Función para leer y parsear los parámetros pasados por línea de comando
@@ -415,9 +445,12 @@ def read_parameters():
     parser.add_argument("--lora-dropout", type=float, default=0.1, help="Dropout probability for LoRA layers (default: 0.1)")
     parser.add_argument("--lora-target-modules", type=str, nargs='+', default=["to_k", "to_q", "to_v", "to_out.0"], help="Target modules for LoRA adaptation")
     parser.add_argument("--guidance-scale", type=float, default=1, help="Guidance scale for inpainting")
+    parser.add_argument("--inference-steps", type=int, default=20, help="Number of inference steps for inpainting")
     parser.add_argument("--overfitting", action='store_true', help="Enable overfitting mode")
     parser.add_argument("--no-overfitting", dest="overfitting", action='store_false', help="Disable overfitting mode")
-    parser.set_defaults(overfitting=False)
+    parser.set_defaults(overfitting=True)
+    parser.add_argument("--save-epoch-tensors", action="store_true", help="Save LoRA weights after each epoch")
+    parser.set_defaults(save_epoch_tensors=False)
     
     args = parser.parse_args()
 
@@ -463,7 +496,6 @@ def main():
 
     model_id = MODELS[args.model]
 
-    wandb.run.name = f"{args.epochs:03d}_epochs_{len(train_loader.dataset):04d}_images_{args.lora_rank:03d}_rank_{args.lora_alpha:03d}_alpha"
     wandb.config.update({
         "model": model_id,
         "epochs": args.epochs, 
@@ -479,8 +511,10 @@ def main():
         "l_dropout": args.lora_dropout,
         "l_modules": args.lora_target_modules,
         "guidance_scale": args.guidance_scale,
+        "inference_steps": args.inference_steps,
         "lr_scheduler": args.lr_scheduler,
-        "overfitting": args.overfitting,})
+        "overfitting": args.overfitting,
+        })
 
     train_lora(model_id, 
                train_loader, 
@@ -493,6 +527,7 @@ def main():
                train_dir=train_dir,
                img_size=args.img_size, 
                save_latent_representations=args.save_latent_representations,
+               save_epoch_tensors=args.save_epoch_tensors,
                lora_rank=args.lora_rank,
                lora_alpha=args.lora_alpha,
                lora_dropout=args.lora_dropout,

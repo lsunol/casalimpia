@@ -172,3 +172,4 @@ wandb/*
 back/data/automaticMasks_new/
 
 back/data/emptyRooms_new/
+back/wandb/*
