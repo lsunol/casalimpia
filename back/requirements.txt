@@ -9,3 +9,4 @@ transformers
 tqdm
 torchmetrics
 wandb
+lpips

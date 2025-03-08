@@ -51,7 +51,7 @@ from empty_rooms_dataset import load_dataset  # Carga del dataset de habitacione
 from image_service import save_epoch_sample  # Servicio para guardar ejemplos durante el entrenamiento
 
 from torch.amp import GradScaler, autocast
-from metrics import calculate_psnr, calculate_ssim
+from metrics import calculate_psnr, calculate_ssim, calculate_lpips
 
 # Select GPU if available
 if not torch.cuda.is_available():
@@ -92,7 +92,7 @@ def upload_safetensors_to_wandb(file_path, artifact_name, artifact_type="model")
 
 # Generación de ejemplos después de cada época de entrenamiento
 # Add this new function after setup_model_with_lora and before train_lora
-def calculate_psnr_and_save_inpaint_samples(pipe, train_set, test_set, epoch, output_dir):
+def evaluate_and_save_samples(pipe, train_set, test_set, epoch, output_dir):
     """
     Generate and save inpainted samples after each epoch
     
@@ -108,6 +108,8 @@ def calculate_psnr_and_save_inpaint_samples(pipe, train_set, test_set, epoch, ou
     test_psnr_values = []
     train_ssim_values = []
     test_ssim_values = []
+    train_lpips_values = []
+    test_lpips_values = []
 
     try:
         pipe.unet.eval()
@@ -161,6 +163,8 @@ def calculate_psnr_and_save_inpaint_samples(pipe, train_set, test_set, epoch, ou
                         train_psnr_values.append(train_psnr)
                         train_ssim = calculate_ssim(inferred_test_image, train_target)
                         train_ssim_values.append(train_ssim)
+                        train_lpips = calculate_lpips(inferred_test_image, train_target, device)
+                        train_lpips_values.append(train_lpips)
 
                         images_to_log.extend([
                             wandb.Image(inferred_test_image, caption=f"train inferred ({i}) - epoch: {epoch + 1}")
@@ -213,6 +217,8 @@ def calculate_psnr_and_save_inpaint_samples(pipe, train_set, test_set, epoch, ou
                         test_psnr_values.append(test_psnr)
                         test_ssim = calculate_ssim(inferred_test_image, test_target)
                         test_ssim_values.append(test_ssim)
+                        test_lpips = calculate_lpips(inferred_test_image, test_target, device)
+                        test_lpips_values.append(test_lpips)
 
                         images_to_log.extend([
                             wandb.Image(inferred_test_image, caption=f"test inferred ({i})- epoch: {epoch + 1}")
@@ -228,7 +234,9 @@ def calculate_psnr_and_save_inpaint_samples(pipe, train_set, test_set, epoch, ou
 
                     wandb.log({"images": images_to_log, "epoch": epoch + 1})
 
-                return np.mean(train_psnr_values), np.mean(test_psnr_values), np.mean(train_ssim_values), np.mean(test_ssim_values)
+                return (np.mean(train_psnr_values), np.mean(test_psnr_values), 
+                        np.mean(train_ssim_values), np.mean(test_ssim_values),
+                        np.mean(train_lpips_values), np.mean(test_lpips_values))
 
     finally:
         pipe.unet.train()
@@ -246,7 +254,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     # Archivo para guardar métricas de entrenamiento
     metrics_log_file = os.path.join(train_dir, "training_metrics.csv")
     with open(metrics_log_file, "w") as f:
-        f.write("epoch,epoch_loss,avg_psnr\n")
+        f.write("epoch,epoch_loss,avg_psnr,epoch_duration\n")
 
     # Cargar el pipeline de inpainting
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
@@ -362,7 +370,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
     first_time_ever = True
     for epoch in range(num_epochs):
-
+        epoch_start_time = time.time()  # Add this line to track epoch start time
+        
         logger.info(f"Epoch {epoch + 1}/{num_epochs}")
 
         unet.train()
@@ -411,8 +420,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             )[0].to(torch_dtype)
 
             if first_time_ever:
-                train_psnr, initial_test_psnr, train_ssim, test_ssim = calculate_psnr_and_save_inpaint_samples(pipe, train_set, test_set, -1, train_dir)
-                logger.info(f"Initial train PSNR: {train_psnr} | initial test PSNR: {initial_test_psnr}, train SSIM: {train_ssim}, test SSIM: {test_ssim}")
+                train_psnr, initial_test_psnr, train_ssim, test_ssim, train_lpips, test_lpips = evaluate_and_save_samples(pipe, train_set, test_set, -1, train_dir)
+                logger.info(f"Initial train PSNR: {train_psnr} | initial test PSNR: {initial_test_psnr}, train SSIM: {train_ssim}, test SSIM: {test_ssim}, train LPIPS: {train_lpips}, test LPIPS: {test_lpips}")
 
                 first_time_ever = False
 
@@ -488,12 +497,13 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         wandb.log({"learning_rate": current_lr, "epoch": epoch + 1})
 
         unet.eval()
-        train_psnr, test_psnr, train_ssim, test_ssim = calculate_psnr_and_save_inpaint_samples(pipe, train_set, test_set, epoch, train_dir)
+        train_psnr, test_psnr, train_ssim, test_ssim, train_lpips, test_lpips = evaluate_and_save_samples(pipe, train_set, test_set, epoch, train_dir)
         wandb.log({
             "train_psnr": train_psnr, "sample_psnr": test_psnr, 
-            "train_ssim": train_ssim, "test_ssim": test_ssim, 
+            "train_ssim": train_ssim, "test_ssim": test_ssim,
+            "train_lpips": train_lpips, "test_lpips": test_lpips, 
             "epoch": epoch + 1})
-        accelerator.print(f"Epoch {epoch+1} - Saved samples, Train PSNR: {train_psnr}, Test PSNR: {test_psnr}, Train SSIM: {train_ssim}, Test SSIM: {test_ssim}")
+        accelerator.print(f"Epoch {epoch+1} - Saved samples, Train PSNR: {train_psnr}, Test PSNR: {test_psnr}, Train SSIM: {train_ssim}, Test SSIM: {test_ssim}, Train LPIPS: {train_lpips}, Test LPIPS: {test_lpips}")
         unet.train()
 
         wandb.log({"epoch_loss": epoch_loss / len(train_loader), "epoch": epoch + 1})
@@ -501,7 +511,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
         # Registrar métricas en CSV (ajusta PSNR si lo calculas)
         with open(metrics_log_file, "a") as f:
-            f.write(f"{epoch},{avg_epoch_loss},{train_psnr if 'psnr' in locals() else 0}\n")
+            f.write(f"{epoch},{avg_epoch_loss},{train_psnr if 'psnr' in locals() else 0},{epoch_duration}\n")
 
         # Save LoRA weights at the end of each epoch
         if save_epoch_tensors:
@@ -512,6 +522,16 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             
             # Upload safetensors to wandb if they exist
             upload_safetensors_to_wandb(f"{epoch_weights_path}/pytorch_lora_weights.safetensors", f"lora_weights_epoch_{epoch + 1}")
+
+        # After all the epoch operations, before starting next epoch:
+        epoch_end_time = time.time()
+        epoch_duration = epoch_end_time - epoch_start_time
+        
+        wandb.log({
+            "epoch_duration": epoch_duration,
+            "epoch": epoch + 1
+        })
+        logger.info(f"Epoch {epoch + 1} duration: {epoch_duration:.2f}s")
 
     # Final del entrenamiento
     accelerator.wait_for_everyone()

@@ -4,6 +4,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 import numpy as np
+import lpips
 
 # Crear el objeto PSNR
 psnr_metric = torchmetrics.image.PeakSignalNoiseRatio().cpu()
@@ -85,3 +86,49 @@ def calculate_ssim(pred_image, target_image):
         target_image = target_image / 255.0
         
     return ssim(pred_image, target_image, channel_axis=2, data_range=1.0)
+
+def calculate_lpips(pred_image, target_image, device='cuda'):
+    """Calculate LPIPS perceptual distance between predicted and target images
+    
+    Args:
+        pred_image: Single PIL Image, numpy array or torch tensor 
+        target_image: Single PIL Image, numpy array or torch tensor
+        device: Device to run LPIPS model on
+        
+    Returns:
+        float: LPIPS distance value (lower is better)
+    """
+    loss_fn = lpips.LPIPS(net='alex').to(device)
+    
+    # Convert PIL images to tensors
+    if isinstance(pred_image, Image.Image):
+        pred_image = transforms.ToTensor()(pred_image).unsqueeze(0)
+    if isinstance(target_image, Image.Image):
+        target_image = transforms.ToTensor()(target_image).unsqueeze(0)
+        
+    # Convert numpy arrays to tensors
+    if isinstance(pred_image, np.ndarray):
+        pred_image = torch.from_numpy(pred_image).permute(2, 0, 1).unsqueeze(0) / 255.0
+    if isinstance(target_image, np.ndarray):
+        target_image = torch.from_numpy(target_image).permute(2, 0, 1).unsqueeze(0) / 255.0
+        
+    # Ensure tensors are in right format
+    if torch.is_tensor(pred_image):
+        if pred_image.dim() == 3:
+            pred_image = pred_image.unsqueeze(0)
+        pred_image = pred_image.to(device)
+    if torch.is_tensor(target_image):
+        if target_image.dim() == 3:
+            target_image = target_image.unsqueeze(0) 
+        target_image = target_image.to(device)
+    
+    # Normalize to [-1,1] if in [0,1]
+    if pred_image.min() >= 0 and pred_image.max() <= 1:
+        pred_image = pred_image * 2 - 1
+    if target_image.min() >= 0 and target_image.max() <= 1:
+        target_image = target_image * 2 - 1
+        
+    with torch.no_grad():
+        lpips_value = loss_fn(pred_image, target_image)
+        
+    return lpips_value.item()
