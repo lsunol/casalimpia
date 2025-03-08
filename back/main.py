@@ -509,10 +509,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         wandb.log({"epoch_loss": epoch_loss / len(train_loader), "epoch": epoch + 1})
         logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)}")
 
-        # Registrar métricas en CSV (ajusta PSNR si lo calculas)
-        with open(metrics_log_file, "a") as f:
-            f.write(f"{epoch},{avg_epoch_loss},{train_psnr if 'psnr' in locals() else 0},{epoch_duration}\n")
-
         # Save LoRA weights at the end of each epoch
         if save_epoch_tensors:
             accelerator.wait_for_everyone()
@@ -526,6 +522,10 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         # After all the epoch operations, before starting next epoch:
         epoch_end_time = time.time()
         epoch_duration = epoch_end_time - epoch_start_time
+
+        # Registrar métricas en CSV (ajusta PSNR si lo calculas)
+        with open(metrics_log_file, "a") as f:
+            f.write(f"{epoch},{avg_epoch_loss},{train_psnr if 'psnr' in locals() else 0},{epoch_duration}\n")
         
         wandb.log({
             "epoch_duration": epoch_duration,
