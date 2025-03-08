@@ -9,13 +9,22 @@ def save_epoch_sample(input_image, input_mask, inferred_image, target_image, epo
     Crea una imagen con un título y concatena las imágenes proporcionadas.
 
     Parámetros:
-        input_image (PIL.Image): Imagen de entrada (RGB).
-        input_mask (PIL.Image): Máscara de entrada (L).
-        inferred_image (PIL.Image): Imagen inferida (RGB).
-        target_image (PIL.Image): Imagen objetivo (RGB).
-        epoch (int): Número de epoch actual.
-        output_path (str): Ruta donde se guardará la imagen resultante.
+        input_image (Union[PIL.Image, np.ndarray]): Imagen de entrada
+        input_mask (Union[PIL.Image, np.ndarray]): Máscara de entrada
+        inferred_image (Union[PIL.Image, np.ndarray]): Imagen inferida
+        target_image (Union[PIL.Image, np.ndarray]): Imagen objetivo
+        epoch (int): Número de epoch actual
+        output_path (str): Ruta donde se guardará la imagen resultante
     """
+    # Convert numpy arrays to PIL Images if necessary
+    if isinstance(inferred_image, np.ndarray):
+        inferred_image = Image.fromarray(inferred_image.astype(np.uint8))
+    if isinstance(input_image, np.ndarray):
+        input_image = Image.fromarray(input_image.astype(np.uint8))
+    if isinstance(input_mask, np.ndarray):
+        input_mask = Image.fromarray(input_mask.astype(np.uint8))
+    if isinstance(target_image, np.ndarray):
+        target_image = Image.fromarray(target_image.astype(np.uint8))
 
     # Tamaño de las imágenes (asumimos que todas tienen el mismo tamaño)
     img_width, img_height = input_image.size

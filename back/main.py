@@ -51,7 +51,7 @@ from empty_rooms_dataset import load_dataset  # Carga del dataset de habitacione
 from image_service import save_epoch_sample  # Servicio para guardar ejemplos durante el entrenamiento
 
 from torch.amp import GradScaler, autocast
-from metrics import calculate_psnr
+from metrics import calculate_psnr, calculate_ssim
 
 # Select GPU if available
 if not torch.cuda.is_available():
@@ -92,68 +92,146 @@ def upload_safetensors_to_wandb(file_path, artifact_name, artifact_type="model")
 
 # Generación de ejemplos después de cada época de entrenamiento
 # Add this new function after setup_model_with_lora and before train_lora
-def calculate_psnr_and_save_inpaint_samples(pipe, dataloader, epoch, output_dir):
-    """Generate and save inpainted samples after each epoch"""
+def calculate_psnr_and_save_inpaint_samples(pipe, train_set, test_set, epoch, output_dir):
+    """
+    Generate and save inpainted samples after each epoch
+    
+    Args:
+        pipe: StableDiffusionInpaintPipeline
+        train_loader: DataLoader for training images
+        sampling_loader: DataLoader for sampling images
+        epoch: Current epoch number
+        output_dir: Directory to save samples
+        max_num_train_psnr_images: Maximum number of training images to use for PSNR calculation
+    """
+    train_psnr_values = []
+    test_psnr_values = []
+    train_ssim_values = []
+    test_ssim_values = []
 
     try:
-        # Guarda el estado original: se pone el U-Net en modo evaluación
-        pipe.unet.eval()        # Cambia a modo evaluación pare el UNET para que no se actualizen los pesos
+        pipe.unet.eval()
 
         with torch.no_grad():
 
-            psnr_values = []
+            # Guarda el estado original: se pone el U-Net en modo evaluación
+            pipe.unet.eval()        # Cambia a modo evaluación pare el UNET para que no se actualizen los pesos
 
-            for input_images, input_masks, target_images, _ in dataloader:
+            with torch.no_grad():
 
-                # Process on GPU
-                input_images = input_images.to(device)
-                input_masks = input_masks.to(device)
+                for i in range(len(train_set[0])):
+                    # Use stored tuple instead of iterating through dataloader
+                    train_image = train_set[0][i]
+                    train_mask = train_set[1][i]
+                    train_target = train_set[2][i]
 
-                # Denormalize images
-                input_images = ((input_images + 1) / 2).clamp(0, 1)
-                target_images = ((target_images + 1) / 2).clamp(0, 1)
+                    # Process on GPU
+                    train_image = train_image.to(device)
+                    train_mask = train_mask.to(device)
 
-                for idx in range(input_images.size(0)):
+                    # Denormalize images
+                    train_image = ((train_image + 1) / 2).clamp(0, 1)
+                    train_target = ((train_target + 1) / 2).clamp(0, 1)
 
                     with torch.autocast(device.type):
-                        inferred_image = pipe(
-                            image=input_images[idx],
-                            mask_image=input_masks[idx],
-                            prompt=EMPTY_ROOM_PROMPT,
+                        inferred_test_images = pipe(
+                            image=train_image,
+                            mask_image=train_mask,
+                            prompt=EMPTY_ROOM_PROMPT[0],
                             num_inference_steps=args.inference_steps,
                             guidance_scale=args.guidance_scale,
                         ).images
 
-                    current_psnr = calculate_psnr(inferred_image, target_images[idx])
-                    psnr_values.append(current_psnr)
-                        
                     # Convert input images to PIL format
-                    pil_img = transforms.ToPILImage()(input_images[idx].cpu())
-                    pil_mask = transforms.ToPILImage()(input_masks[idx].cpu())
-                    pil_target = transforms.ToPILImage()(target_images[idx].cpu())
+                    to_pil = transforms.ToPILImage()  # Create the transformer
+                    pil_img = to_pil(train_image.cpu())  # Convert single image tensor to PIL
+                    pil_mask = to_pil(train_mask.cpu())  # Convert single mask tensor to PIL 
+                    pil_target = to_pil(train_target.cpu())  # Convert single target tensor to PIL
 
                     images_to_log = [
-                        wandb.Image(pil_img, caption=f"input - epoch: {epoch + 1}"),
-                        wandb.Image(pil_target, caption=f"target - epoch: {epoch + 1}"),
-                        wandb.Image(inferred_image[0], caption=f"inferred - epoch: {epoch + 1}")
+                        wandb.Image(pil_img, caption=f"train input - epoch: {epoch + 1}"),
+                        wandb.Image(pil_target, caption=f"train target - epoch: {epoch + 1}"),
                     ]
+
+                    # Convert tensor outputs to numpy arrays for metric calculation
+                    for i in range(len(inferred_test_images)):
+                        inferred_test_image = np.array(inferred_test_images[i])
+
+                        train_psnr = calculate_psnr(inferred_test_image, train_target)
+                        train_psnr_values.append(train_psnr)
+                        train_ssim = calculate_ssim(inferred_test_image, train_target)
+                        train_ssim_values.append(train_ssim)
+
+                        images_to_log.extend([
+                            wandb.Image(inferred_test_image, caption=f"train inferred ({i}) - epoch: {epoch + 1}")
+                        ])
+
+                        save_epoch_sample(input_image=pil_img, 
+                                        input_mask=pil_mask,
+                                        inferred_image=inferred_test_image, 
+                                        target_image=pil_target,
+                                        epoch=epoch, 
+                                        sample_index=1,
+                                        output_path=output_dir)
+
+                    # Use stored tuple instead of iterating through dataloader
+                    test_image = test_set[0][i]
+                    test_mask = test_set[1][i]
+                    test_target = test_set[2][i]
+
+                    # Process on GPU
+                    test_image = test_image.to(device)
+                    test_mask = test_mask.to(device)
+
+                    # Denormalize images
+                    test_image = ((test_image + 1) / 2).clamp(0, 1)
+                    test_target = ((test_target + 1) / 2).clamp(0, 1)
+
+                    with torch.autocast(device.type):
+                        inferred_test_images = pipe(
+                            image=test_image,
+                            mask_image=test_mask,
+                            prompt=EMPTY_ROOM_PROMPT[0],
+                            num_inference_steps=args.inference_steps,
+                            guidance_scale=args.guidance_scale,
+                        ).images
+
+                    # Convert input images to PIL format
+                    pil_img = to_pil(test_image.cpu())
+                    pil_mask = to_pil(test_mask.cpu())
+                    pil_target = to_pil(test_target.cpu())
+
+                    images_to_log.extend([
+                        wandb.Image(pil_img, caption=f"test input - epoch: {epoch + 1}"),
+                        wandb.Image(pil_target, caption=f"test target - epoch: {epoch + 1}"),
+                    ])
+
+                    for i in range(len(inferred_test_images)):
+                        inferred_test_image = np.array(inferred_test_images[i])
+
+                        test_psnr = calculate_psnr(inferred_test_image, test_target)
+                        test_psnr_values.append(test_psnr)
+                        test_ssim = calculate_ssim(inferred_test_image, test_target)
+                        test_ssim_values.append(test_ssim)
+
+                        images_to_log.extend([
+                            wandb.Image(inferred_test_image, caption=f"test inferred ({i})- epoch: {epoch + 1}")
+                        ])
+
+                        save_epoch_sample(input_image=pil_img, 
+                                        input_mask=pil_mask,
+                                        inferred_image=inferred_test_image, 
+                                        target_image=pil_target,
+                                        epoch=epoch, 
+                                        sample_index=1,
+                                        output_path=output_dir)
+
                     wandb.log({"images": images_to_log, "epoch": epoch + 1})
 
-                    save_epoch_sample(input_image=pil_img, 
-                                    input_mask=pil_mask,
-                                    inferred_image=inferred_image[0], 
-                                    target_image=pil_target,
-                                    epoch=epoch, 
-                                    sample_index=idx,
-                                    output_path=output_dir)
-
-            return np.mean(psnr_values)
-
-    except Exception as e:
-        print(f"Error during sample generation: {str(e)}")  # Captura y muestra cualquier error durante la generación de muestras.
+                return np.mean(train_psnr_values), np.mean(test_psnr_values), np.mean(train_ssim_values), np.mean(test_ssim_values)
 
     finally:
-        pipe.unet.train()        # Vuelve a modo entrenamiento
+        pipe.unet.train()
 
 
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
@@ -264,6 +342,24 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     # Noise scheduler para la difusión
     noise_scheduler = DDPMScheduler.from_pretrained(model_id, subfolder="scheduler")    
 
+    # Get first max_num_train_psnr_images samples from train_loader
+    first_batch = next(iter(train_loader))
+    train_set = (
+        first_batch[0][:args.eval_sample_size], 
+        first_batch[1][:args.eval_sample_size],
+        first_batch[2][:args.eval_sample_size],
+        first_batch[3][:args.eval_sample_size]
+    )
+
+    # Get first max_num_train_psnr_images samples from test_loader 
+    first_batch = next(iter(test_loader))
+    test_set = (
+        first_batch[0][:args.eval_sample_size],
+        first_batch[1][:args.eval_sample_size],
+        first_batch[2][:args.eval_sample_size], 
+        first_batch[3][:args.eval_sample_size]
+    )
+
     first_time_ever = True
     for epoch in range(num_epochs):
 
@@ -315,8 +411,8 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             )[0].to(torch_dtype)
 
             if first_time_ever:
-                psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, -1, train_dir)
-                logger.info(f"Initial PSNR: {psnr}")
+                train_psnr, initial_test_psnr, train_ssim, test_ssim = calculate_psnr_and_save_inpaint_samples(pipe, train_set, test_set, -1, train_dir)
+                logger.info(f"Initial train PSNR: {train_psnr} | initial test PSNR: {initial_test_psnr}, train SSIM: {train_ssim}, test SSIM: {test_ssim}")
 
                 first_time_ever = False
 
@@ -384,25 +480,28 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
         # Promedio de pérdida por época
         avg_epoch_loss = epoch_loss / len(train_loader)
-        wandb.log({"epoch_loss": avg_epoch_loss, "psnr": psnr, "epoch": epoch + 1})
+        wandb.log({"epoch_loss": avg_epoch_loss, "epoch": epoch + 1})
         accelerator.print(f"Epoch {epoch + 1} Loss: {avg_epoch_loss}")
 
         # LR actual
         current_lr = optimizer.param_groups[0]['lr']
         wandb.log({"learning_rate": current_lr, "epoch": epoch + 1})
 
-        if (epoch + 1) % max(1, num_epochs // 10) == 0:
-            unet.eval()
-            # Aquí usamos train_loader (o test_loader) para las muestras
-            psnr = calculate_psnr_and_save_inpaint_samples(pipe, sampling_loader, epoch, train_dir)
-            accelerator.print(f"Epoch {epoch+1} - Saved samples, PSNR: {psnr}")
-            unet.train()
+        unet.eval()
+        train_psnr, test_psnr, train_ssim, test_ssim = calculate_psnr_and_save_inpaint_samples(pipe, train_set, test_set, epoch, train_dir)
+        wandb.log({
+            "train_psnr": train_psnr, "sample_psnr": test_psnr, 
+            "train_ssim": train_ssim, "test_ssim": test_ssim, 
+            "epoch": epoch + 1})
+        accelerator.print(f"Epoch {epoch+1} - Saved samples, Train PSNR: {train_psnr}, Test PSNR: {test_psnr}, Train SSIM: {train_ssim}, Test SSIM: {test_ssim}")
+        unet.train()
 
-        wandb.log({"epoch_loss": epoch_loss / len(train_loader), "psnr": psnr, "epoch": epoch + 1})
-        logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)} | PSNR: {psnr}")
+        wandb.log({"epoch_loss": epoch_loss / len(train_loader), "epoch": epoch + 1})
+        logger.info(f"Epoch Loss: {epoch_loss / len(train_loader)}")
+
         # Registrar métricas en CSV (ajusta PSNR si lo calculas)
         with open(metrics_log_file, "a") as f:
-            f.write(f"{epoch},{avg_epoch_loss},{psnr if 'psnr' in locals() else 0}\n")
+            f.write(f"{epoch},{avg_epoch_loss},{train_psnr if 'psnr' in locals() else 0}\n")
 
         # Save LoRA weights at the end of each epoch
         if save_epoch_tensors:
@@ -448,9 +547,10 @@ def read_parameters():
     parser.add_argument("--inference-steps", type=int, default=20, help="Number of inference steps for inpainting")
     parser.add_argument("--overfitting", action='store_true', help="Enable overfitting mode")
     parser.add_argument("--no-overfitting", dest="overfitting", action='store_false', help="Disable overfitting mode")
-    parser.set_defaults(overfitting=True)
+    parser.set_defaults(overfitting=False)
     parser.add_argument("--save-epoch-tensors", action="store_true", help="Save LoRA weights after each epoch")
     parser.set_defaults(save_epoch_tensors=False)
+    parser.add_argument("--eval-sample-size", type=int, default=5, help="Number of images to use for evaluation metrics (PSNR, SSIM, etc.)")
     
     args = parser.parse_args()
 

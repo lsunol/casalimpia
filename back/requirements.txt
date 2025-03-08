@@ -4,6 +4,7 @@ peft
 torchvision
 diffusers
 scipy
+scikit-image
 transformers
 tqdm
 torchmetrics
