@@ -170,13 +170,14 @@ def evaluate_and_save_samples(pipe, train_set, test_set, epoch, output_dir):
                             wandb.Image(inferred_test_image, caption=f"train inferred ({i}) - epoch: {epoch + 1}")
                         ])
 
-                        save_epoch_sample(input_image=pil_img, 
-                                        input_mask=pil_mask,
-                                        inferred_image=inferred_test_image, 
-                                        target_image=pil_target,
-                                        epoch=epoch, 
-                                        sample_index=1,
-                                        output_path=output_dir)
+                        if args.save_epoch_result_images:
+                            save_epoch_sample(input_image=pil_img, 
+                                            input_mask=pil_mask,
+                                            inferred_image=inferred_test_image, 
+                                            target_image=pil_target,
+                                            epoch=epoch, 
+                                            sample_index=1,
+                                            output_path=output_dir)
 
                     # Use stored tuple instead of iterating through dataloader
                     test_image = test_set[0][i]
@@ -224,13 +225,14 @@ def evaluate_and_save_samples(pipe, train_set, test_set, epoch, output_dir):
                             wandb.Image(inferred_test_image, caption=f"test inferred ({i})- epoch: {epoch + 1}")
                         ])
 
-                        save_epoch_sample(input_image=pil_img, 
-                                        input_mask=pil_mask,
-                                        inferred_image=inferred_test_image, 
-                                        target_image=pil_target,
-                                        epoch=epoch, 
-                                        sample_index=1,
-                                        output_path=output_dir)
+                        if args.save_epoch_result_images:
+                            save_epoch_sample(input_image=pil_img, 
+                                            input_mask=pil_mask,
+                                            inferred_image=inferred_test_image, 
+                                            target_image=pil_target,
+                                            epoch=epoch, 
+                                            sample_index=1,
+                                            output_path=output_dir)
 
                     wandb.log({"images": images_to_log, "epoch": epoch + 1})
 
@@ -499,7 +501,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         unet.eval()
         train_psnr, test_psnr, train_ssim, test_ssim, train_lpips, test_lpips = evaluate_and_save_samples(pipe, train_set, test_set, epoch, train_dir)
         wandb.log({
-            "train_psnr": train_psnr, "sample_psnr": test_psnr, 
+            "train_psnr": train_psnr, "test_psnr": test_psnr, 
             "train_ssim": train_ssim, "test_ssim": test_ssim,
             "train_lpips": train_lpips, "test_lpips": test_lpips, 
             "epoch": epoch + 1})
@@ -571,6 +573,8 @@ def read_parameters():
     parser.add_argument("--save-epoch-tensors", action="store_true", help="Save LoRA weights after each epoch")
     parser.set_defaults(save_epoch_tensors=False)
     parser.add_argument("--eval-sample-size", type=int, default=5, help="Number of images to use for evaluation metrics (PSNR, SSIM, etc.)")
+    parser.add_argument("--save-epoch-result-images", action="store_true", help="Save result images after each epoch")
+    parser.set_defaults(save_epoch_result_images=False)
     
     args = parser.parse_args()
 
