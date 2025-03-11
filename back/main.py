@@ -90,9 +90,87 @@ def upload_safetensors_to_wandb(file_path, artifact_name, artifact_type="model")
     artifact.add_file(file_path)
     wandb.log_artifact(artifact)
 
+
+def infer_and_calculate_metrics(masked_image, mask, original_image, label, epoch, pipe, output_dir, 
+                                calculate_metrics=True):
+    # Process on GPU
+    masked_image = masked_image.to(device)
+    mask = mask.to(device)
+
+    # Denormalize images
+    masked_image = ((masked_image + 1) / 2).clamp(0, 1)
+    original_image = ((original_image + 1) / 2).clamp(0, 1)
+
+    with torch.autocast(device.type):
+        inferred_test_images = pipe(
+            image=masked_image,
+            mask_image=mask,
+            prompt=EMPTY_ROOM_PROMPT[0],
+            num_inference_steps=args.inference_steps,
+            guidance_scale=args.guidance_scale,
+        ).images
+
+    # Convert input images to PIL format
+    to_pil = transforms.ToPILImage()  # Create the transformer
+    pil_img = to_pil(masked_image.cpu())  # Convert single image tensor to PIL
+    pil_mask = to_pil(mask.cpu())  # Convert single mask tensor to PIL 
+    pil_target = to_pil(original_image.cpu())  # Convert single target tensor to PIL
+
+    image_groups = {
+        "train": 1,
+        "test": 2,
+        "furnished": 3
+    }
+
+    images_to_log = [
+        wandb.Image(pil_img, caption=f"{label} input - epoch: {epoch + 1}", grouping=image_groups[label]),
+        wandb.Image(pil_target, caption=f"{label} target - epoch: {epoch + 1}", grouping=image_groups[label]),
+    ]
+
+    psnr_values = []
+    ssim_values = []
+    lpips_values = []
+
+    # Convert tensor outputs to numpy arrays for metric calculation
+    for i in range(len(inferred_test_images)):
+
+        inferred_test_image = np.array(inferred_test_images[i])
+
+        images_to_log.extend([
+            wandb.Image(inferred_test_image, caption=f"{label} inferred ({i}) - epoch: {epoch + 1}", grouping=image_groups[label])
+        ])
+
+        if args.save_epoch_result_images:
+            save_epoch_sample(input_image=pil_img, 
+                            input_mask=pil_mask,
+                            inferred_image=inferred_test_image, 
+                            target_image=pil_target,
+                            epoch=epoch, 
+                            sample_index=1,
+                            output_path=output_dir)
+
+        if (calculate_metrics):
+            psnr = calculate_psnr(inferred_test_image, original_image)
+            psnr_values.append(psnr)
+            ssim = calculate_ssim(inferred_test_image, original_image)
+            ssim_values.append(ssim)
+            lpips = calculate_lpips(inferred_test_image, original_image, device)
+            lpips_values.append(lpips)
+
+    if (calculate_metrics):
+        mean_psnr = np.mean(psnr_values)
+        mean_ssim = np.mean(ssim_values)
+        mean_lpips = np.mean(lpips_values)
+
+        logger.info(f"{label} PSNR: {mean_psnr} | {label} SSIM: {mean_ssim}, {label} LPIPS: {mean_lpips}")
+        wandb.log({f"{label}_psnr": mean_psnr, f"{label}_ssim": mean_ssim, f"{label}_lpips": mean_lpips, "epoch": epoch + 1})
+
+    return images_to_log
+    # wandb.log({"images": images_to_log, "type": label, "epoch": epoch + 1})
+
 # Generación de ejemplos después de cada época de entrenamiento
 # Add this new function after setup_model_with_lora and before train_lora
-def evaluate_and_save_samples(pipe, train_set, test_set, epoch, output_dir):
+def evaluate_and_save_samples(pipe, train_set, test_set, rooms_with_furniture_loader, epoch, output_dir):
     """
     Generate and save inpainted samples after each epoch
     
@@ -104,12 +182,6 @@ def evaluate_and_save_samples(pipe, train_set, test_set, epoch, output_dir):
         output_dir: Directory to save samples
         max_num_train_psnr_images: Maximum number of training images to use for PSNR calculation
     """
-    train_psnr_values = []
-    test_psnr_values = []
-    train_ssim_values = []
-    test_ssim_values = []
-    train_lpips_values = []
-    test_lpips_values = []
 
     try:
         pipe.unet.eval()
@@ -122,130 +194,41 @@ def evaluate_and_save_samples(pipe, train_set, test_set, epoch, output_dir):
             with torch.no_grad():
 
                 for i in range(len(train_set[0])):
+
                     # Use stored tuple instead of iterating through dataloader
                     train_image = train_set[0][i]
                     train_mask = train_set[1][i]
                     train_target = train_set[2][i]
 
-                    # Process on GPU
-                    train_image = train_image.to(device)
-                    train_mask = train_mask.to(device)
+                    images_to_log = infer_and_calculate_metrics(train_image, train_mask, train_target, "train", 
+                                                epoch, pipe, output_dir)
 
-                    # Denormalize images
-                    train_image = ((train_image + 1) / 2).clamp(0, 1)
-                    train_target = ((train_target + 1) / 2).clamp(0, 1)
-
-                    with torch.autocast(device.type):
-                        inferred_test_images = pipe(
-                            image=train_image,
-                            mask_image=train_mask,
-                            prompt=EMPTY_ROOM_PROMPT[0],
-                            num_inference_steps=args.inference_steps,
-                            guidance_scale=args.guidance_scale,
-                        ).images
-
-                    # Convert input images to PIL format
-                    to_pil = transforms.ToPILImage()  # Create the transformer
-                    pil_img = to_pil(train_image.cpu())  # Convert single image tensor to PIL
-                    pil_mask = to_pil(train_mask.cpu())  # Convert single mask tensor to PIL 
-                    pil_target = to_pil(train_target.cpu())  # Convert single target tensor to PIL
-
-                    images_to_log = [
-                        wandb.Image(pil_img, caption=f"train input - epoch: {epoch + 1}"),
-                        wandb.Image(pil_target, caption=f"train target - epoch: {epoch + 1}"),
-                    ]
-
-                    # Convert tensor outputs to numpy arrays for metric calculation
-                    for i in range(len(inferred_test_images)):
-                        inferred_test_image = np.array(inferred_test_images[i])
-
-                        train_psnr = calculate_psnr(inferred_test_image, train_target)
-                        train_psnr_values.append(train_psnr)
-                        train_ssim = calculate_ssim(inferred_test_image, train_target)
-                        train_ssim_values.append(train_ssim)
-                        train_lpips = calculate_lpips(inferred_test_image, train_target, device)
-                        train_lpips_values.append(train_lpips)
-
-                        images_to_log.extend([
-                            wandb.Image(inferred_test_image, caption=f"train inferred ({i}) - epoch: {epoch + 1}")
-                        ])
-
-                        if args.save_epoch_result_images:
-                            save_epoch_sample(input_image=pil_img, 
-                                            input_mask=pil_mask,
-                                            inferred_image=inferred_test_image, 
-                                            target_image=pil_target,
-                                            epoch=epoch, 
-                                            sample_index=1,
-                                            output_path=output_dir)
+                for i in range(len(test_set[0])):
 
                     # Use stored tuple instead of iterating through dataloader
                     test_image = test_set[0][i]
                     test_mask = test_set[1][i]
                     test_target = test_set[2][i]
 
-                    # Process on GPU
-                    test_image = test_image.to(device)
-                    test_mask = test_mask.to(device)
+                    images_to_log.extend(
+                        infer_and_calculate_metrics(test_image, test_mask, test_target, "test", epoch, pipe, output_dir))
 
-                    # Denormalize images
-                    test_image = ((test_image + 1) / 2).clamp(0, 1)
-                    test_target = ((test_target + 1) / 2).clamp(0, 1)
+                for i in range(len(rooms_with_furniture_loader.dataset)):
 
-                    with torch.autocast(device.type):
-                        inferred_test_images = pipe(
-                            image=test_image,
-                            mask_image=test_mask,
-                            prompt=EMPTY_ROOM_PROMPT[0],
-                            num_inference_steps=args.inference_steps,
-                            guidance_scale=args.guidance_scale,
-                        ).images
+                    # Get image from rooms_with_furniture_loader
+                    furnished_image = next(iter(rooms_with_furniture_loader))[0][0]
+                    furniture_mask = next(iter(rooms_with_furniture_loader))[1][0]
 
-                    # Convert input images to PIL format
-                    pil_img = to_pil(test_image.cpu())
-                    pil_mask = to_pil(test_mask.cpu())
-                    pil_target = to_pil(test_target.cpu())
+                    images_to_log.extend(
+                        infer_and_calculate_metrics(furnished_image, furniture_mask, furnished_image, "furnished", epoch, pipe, output_dir, calculate_metrics = False))
 
-                    images_to_log.extend([
-                        wandb.Image(pil_img, caption=f"test input - epoch: {epoch + 1}"),
-                        wandb.Image(pil_target, caption=f"test target - epoch: {epoch + 1}"),
-                    ])
-
-                    for i in range(len(inferred_test_images)):
-                        inferred_test_image = np.array(inferred_test_images[i])
-
-                        test_psnr = calculate_psnr(inferred_test_image, test_target)
-                        test_psnr_values.append(test_psnr)
-                        test_ssim = calculate_ssim(inferred_test_image, test_target)
-                        test_ssim_values.append(test_ssim)
-                        test_lpips = calculate_lpips(inferred_test_image, test_target, device)
-                        test_lpips_values.append(test_lpips)
-
-                        images_to_log.extend([
-                            wandb.Image(inferred_test_image, caption=f"test inferred ({i})- epoch: {epoch + 1}")
-                        ])
-
-                        if args.save_epoch_result_images:
-                            save_epoch_sample(input_image=pil_img, 
-                                            input_mask=pil_mask,
-                                            inferred_image=inferred_test_image, 
-                                            target_image=pil_target,
-                                            epoch=epoch, 
-                                            sample_index=1,
-                                            output_path=output_dir)
-
-                    wandb.log({"images": images_to_log, "epoch": epoch + 1})
-
-                return (np.mean(train_psnr_values), np.mean(test_psnr_values), 
-                        np.mean(train_ssim_values), np.mean(test_ssim_values),
-                        np.mean(train_lpips_values), np.mean(test_lpips_values))
-
+            wandb.log({"images": images_to_log, "epoch": epoch + 1})
     finally:
         pipe.unet.train()
 
 
 # Training LoRA: concatenates images and masks into a single tensor for training (6 chanel input)
-def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, overfitting_loader, train_dir, 
+def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader, overfitting_loader, rooms_with_furniture_loader, train_dir, 
                num_epochs=5, lr=1e-4, img_size=512, dtype="float32", 
                save_latent_representations=False, save_epoch_tensors=False, lora_rank=32, lora_alpha=16, lora_dropout=0.1,
                lora_target_modules=["to_k", "to_q", "to_v", "to_out.0"], overfitting=False, timestamp=None):
@@ -422,8 +405,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
             )[0].to(torch_dtype)
 
             if first_time_ever:
-                train_psnr, initial_test_psnr, train_ssim, test_ssim, train_lpips, test_lpips = evaluate_and_save_samples(pipe, train_set, test_set, -1, train_dir)
-                logger.info(f"Initial train PSNR: {train_psnr} | initial test PSNR: {initial_test_psnr}, train SSIM: {train_ssim}, test SSIM: {test_ssim}, train LPIPS: {train_lpips}, test LPIPS: {test_lpips}")
+                evaluate_and_save_samples(pipe, train_set, test_set, rooms_with_furniture_loader, -1, train_dir)
 
                 first_time_ever = False
 
@@ -499,13 +481,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
         wandb.log({"learning_rate": current_lr, "epoch": epoch + 1})
 
         unet.eval()
-        train_psnr, test_psnr, train_ssim, test_ssim, train_lpips, test_lpips = evaluate_and_save_samples(pipe, train_set, test_set, epoch, train_dir)
-        wandb.log({
-            "train_psnr": train_psnr, "test_psnr": test_psnr, 
-            "train_ssim": train_ssim, "test_ssim": test_ssim,
-            "train_lpips": train_lpips, "test_lpips": test_lpips, 
-            "epoch": epoch + 1})
-        accelerator.print(f"Epoch {epoch+1} - Saved samples, Train PSNR: {train_psnr}, Test PSNR: {test_psnr}, Train SSIM: {train_ssim}, Test SSIM: {test_ssim}, Train LPIPS: {train_lpips}, Test LPIPS: {test_lpips}")
+        evaluate_and_save_samples(pipe, train_set, test_set, rooms_with_furniture_loader, epoch, train_dir)
         unet.train()
 
         wandb.log({"epoch_loss": epoch_loss / len(train_loader), "epoch": epoch + 1})
@@ -527,7 +503,7 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
 
         # Registrar métricas en CSV (ajusta PSNR si lo calculas)
         with open(metrics_log_file, "a") as f:
-            f.write(f"{epoch},{avg_epoch_loss},{train_psnr if 'psnr' in locals() else 0},{epoch_duration}\n")
+            f.write(f"{epoch},{avg_epoch_loss},{epoch_duration}\n")
         
         wandb.log({
             "epoch_duration": epoch_duration,
@@ -606,7 +582,7 @@ def main():
 
     logger.info("Start training")
 
-    train_loader, val_loader, test_loader, overfitting_loader, sampling_loader = load_dataset(
+    train_loader, val_loader, test_loader, overfitting_loader, sampling_loader, rooms_with_furniture_loader = load_dataset(
         inputs_dir=args.empty_rooms_dir, 
         masks_dir=args.masks_dir, 
         batch_size=args.batch_size, 
@@ -646,6 +622,7 @@ def main():
                val_loader, 
                sampling_loader,
                overfitting_loader,
+               rooms_with_furniture_loader,
                num_epochs=args.epochs,
                lr=args.initial_learning_rate,
                train_dir=train_dir,

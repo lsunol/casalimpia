@@ -11,19 +11,18 @@ from scipy.ndimage import binary_dilation
 # Define the InpaintingDataset class within the module
 class InpaintingDataset(torch.utils.data.Dataset):
 
-    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms, mask_padding, logger):
+    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms, mask_padding, logger, random_masks=True):
         
         self.logger = logger
         self.inputs_dir = inputs_dir
         self.masks_dir = masks_dir
         self.input_files = sorted(os.listdir(inputs_dir))
-        logger.info(f"Number of input images: {len(self.input_files)}")
         self.image_transforms = image_transforms
         self.masks_transforms = masks_transforms
         self.mask_files = sorted(os.listdir(self.masks_dir))
         self.length_masks = len(self.mask_files)
-        logger.info(f"Number of masks: {self.length_masks}")
         self.mask_padding = mask_padding
+        self.random_masks = random_masks
 
     def __len__(self):
         return len(self.input_files)
@@ -53,8 +52,8 @@ class InpaintingDataset(torch.utils.data.Dataset):
         input_image = self.image_transforms(input_image)
 
         # Pick one random mask file from directory
-        random_mask_idx = torch.randint(0, self.length_masks, (1,)).item()
-        mask_path = os.path.join(self.masks_dir, self.mask_files[random_mask_idx])
+        mask_idx = torch.randint(0, self.length_masks, (1,)).item() if self.random_masks else idx
+        mask_path = os.path.join(self.masks_dir, self.mask_files[mask_idx])
         mask = Image.open(mask_path).convert("L")
         mask = self.masks_transforms(mask)
 
@@ -149,14 +148,25 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         logger=logger
     )
 
+    rooms_with_furniture_dataset = InpaintingDataset(
+        inputs_dir="./back/data/roomsWithFurniture/rooms",
+        masks_dir="./back/data/roomsWithFurniture/masks",
+        random_masks=False,
+        mask_padding=mask_padding,
+        image_transforms=images_transforms_center_crop,
+        masks_transforms=masks_transforms_center_crop,
+        logger=logger
+    )
+
     # Create the data loaders
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     overfitting_loader = torch.utils.data.DataLoader(overfitting_dataset, batch_size=max(batch_size, len(overfitting_dataset)), shuffle=False)
     sampling_loader = torch.utils.data.DataLoader(sampling_dataset, batch_size=1, shuffle=False)
+    rooms_with_furniture_loader = torch.utils.data.DataLoader(rooms_with_furniture_dataset, batch_size=1, shuffle=False)
 
-    return train_loader, val_loader, test_loader, overfitting_loader, sampling_loader
+    return train_loader, val_loader, test_loader, overfitting_loader, sampling_loader, rooms_with_furniture_loader
 
 # Merge Inputs and Masks: combina img de habitación vacia con mascara de habitación vacia
 def merge_image_with_mask(input_image, mask_image):
