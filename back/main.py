@@ -216,8 +216,9 @@ def evaluate_and_save_samples(pipe, train_set, test_set, rooms_with_furniture_lo
                 for i in range(len(rooms_with_furniture_loader.dataset)):
 
                     # Get image from rooms_with_furniture_loader
-                    furnished_image = next(iter(rooms_with_furniture_loader))[0][0]
-                    furniture_mask = next(iter(rooms_with_furniture_loader))[1][0]
+                    furnished_batch = next(iter(rooms_with_furniture_loader))
+                    furnished_image = furnished_batch[0][0]
+                    furniture_mask = furnished_batch[1][0]
 
                     images_to_log.extend(
                         infer_and_calculate_metrics(furnished_image, furniture_mask, furnished_image, "furnished", epoch, pipe, output_dir, calculate_metrics = False))
@@ -357,6 +358,14 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     for epoch in range(num_epochs):
         epoch_start_time = time.time()  # Add this line to track epoch start time
         
+        # Update current epoch in datasets
+        train_loader.dataset.current_epoch = epoch
+        val_loader.dataset.current_epoch = epoch
+        test_loader.dataset.current_epoch = epoch
+        rooms_with_furniture_loader.dataset.current_epoch = epoch
+        sampling_loader.dataset.current_epoch = epoch
+        overfitting_loader.dataset.current_epoch = epoch
+
         logger.info(f"Epoch {epoch + 1}/{num_epochs}")
 
         unet.train()
@@ -551,6 +560,7 @@ def read_parameters():
     parser.add_argument("--eval-sample-size", type=int, default=5, help="Number of images to use for evaluation metrics (PSNR, SSIM, etc.)")
     parser.add_argument("--save-epoch-result-images", action="store_true", help="Save result images after each epoch")
     parser.set_defaults(save_epoch_result_images=False)
+    parser.add_argument("--shape-warmup-epochs-pct", type=float, default=0.0, help="Percentage of epochs to train with basic shape masks before real masks (0.0-1.0)")
     
     args = parser.parse_args()
 
@@ -588,10 +598,8 @@ def main():
         batch_size=args.batch_size, 
         mask_padding=0,
         img_size=args.img_size,
-        train_ratio=0.7,
-        val_ratio=0.15,
-        test_ratio=0.15,
-        seed=42,
+        num_epochs=args.epochs,
+        shape_warmup_epochs_pct=args.shape_warmup_epochs_pct,
         logger=logger)
 
     model_id = MODELS[args.model]
