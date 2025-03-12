@@ -250,9 +250,6 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     # Cargar componentes: text encoder, VAE y U-Net
     text_encoder = CLIPTextModel.from_pretrained(model_id, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae")
-    unet = UNet2DConditionModel.from_pretrained(model_id, subfolder="unet")
-   
-    # Load UNet and force float32
     unet = UNet2DConditionModel.from_pretrained(model_id, subfolder="unet").to(device, dtype=torch.float32)
     logger.info(f"UNet forced dtype: {next(unet.parameters()).dtype}")  # Confirm float32
 
@@ -527,6 +524,7 @@ def read_parameters():
 
     parser = argparse.ArgumentParser(description="Entrenar modelo de segmentación con LoRA")
     parser.add_argument("--empty-rooms-dir", type=str, required=True, help="Dataset folder containing images of empty rooms")
+    parser.add_argument("--margin-masks-dir", type=str, required=True, help="Dataset folder containing margin mask contours") ##ADDED IN MERGED
     parser.add_argument("--masks-dir", type=str, required=True, help="Dataset folder containing images of masks")
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs for training")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size for training")
@@ -585,6 +583,7 @@ def main():
     train_loader, val_loader, test_loader, overfitting_loader, sampling_loader, rooms_with_furniture_loader = load_dataset(
         inputs_dir=args.empty_rooms_dir, 
         masks_dir=args.masks_dir, 
+        margin_masks_dir=args.margin_masks_dir, 
         batch_size=args.batch_size, 
         mask_padding=0,
         img_size=args.img_size,

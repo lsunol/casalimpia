@@ -4,18 +4,19 @@ import torch.utils
 import torchvision.transforms as transforms
 import PIL
 from PIL import Image
-import numpy 
+import numpy as np
 from scipy.ndimage import binary_dilation
 
 
 # Define the InpaintingDataset class within the module
 class InpaintingDataset(torch.utils.data.Dataset):
 
-    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms, mask_padding, logger, random_masks=True):
+    def __init__(self, inputs_dir, masks_dir, margin_masks_dir, image_transforms, masks_transforms, mask_padding, logger, random_masks=True):
         
         self.logger = logger
         self.inputs_dir = inputs_dir
         self.masks_dir = masks_dir
+        self.margin_masks_dir = margin_masks_dir
         self.input_files = sorted(os.listdir(inputs_dir))
         self.image_transforms = image_transforms
         self.masks_transforms = masks_transforms
@@ -51,18 +52,57 @@ class InpaintingDataset(torch.utils.data.Dataset):
         input_image = Image.open(input_path).convert("RGB")
         input_image = self.image_transforms(input_image)
 
-        # Pick one random mask file from directory
+        # Pick one mask from directory (randomy if random_masks is set to True)
         mask_idx = torch.randint(0, self.length_masks, (1,)).item() if self.random_masks else idx
         mask_path = os.path.join(self.masks_dir, self.mask_files[mask_idx])
         mask = Image.open(mask_path).convert("L")
         mask = self.masks_transforms(mask)
 
-        masked_image = merge_image_with_mask(input_image, mask)
+        foreground_mask_path = os.path.join(self.masks_dir, self.mask_files[mask_idx])
+        
+        # Get the number prefix from the foreground mask filename
+        mask_number = self.mask_files[mask_idx].split('_')[0]
+        
+        # Construct the corresponding margin mask filename and path
+        margin_mask_filename = f"{mask_number}_margin_mask.png"
+        margin_mask_path = os.path.join(self.margin_masks_dir, margin_mask_filename)
+        
+        # Load the margin mask with alpha channel using PIL
+        margin_mask = Image.open(margin_mask_path).convert('RGBA')
+        
+        # Resize margin mask to match input image size
+        margin_mask = margin_mask.resize((input_image.size(1), input_image.size(2)), Image.BICUBIC)
+        
+        # Fix broadcasting issue - ensure consistent channel ordering
+        input_np = input_image.numpy()  # Should already be in (C,H,W) format
+        margin_np = np.array(margin_mask)
+        
+        # Ensure margin_np is in (C,H,W) format
+        if len(margin_np.shape) == 3:
+            if margin_np.shape[2] == 4:  # If RGBA
+                margin_np = margin_np[..., :3]  # Keep only RGB channels
+            margin_np = margin_np.transpose(2, 0, 1)  # Change from (H,W,C) to (C,H,W)
+        else:
+            margin_np = margin_np[None, :, :]  # Add channel dim if grayscale
+        
+        # Alpha blending with correct shapes (both should be C,H,W)
+        alpha = 0.5
+        result = input_np * (1 - alpha) + margin_np * alpha
+        
+        # Convert back to tensor directly since we're already in (C,H,W) format
+        transformed_input = torch.from_numpy(result).float()
 
-        return masked_image, add_padding_to_mask(mask, self.mask_padding), input_image, mask 
+        # Load and transform the foreground mask
+        foreground_mask = Image.open(foreground_mask_path).convert("L")
+        mask = self.masks_transforms(foreground_mask)
+        
+        # Create the masked image using the foreground mask
+        masked_input = transformed_input * (1 - mask)
+
+        return transformed_input, mask, masked_input
 
 # Load Dataset: prepara DataLoader para el batch training. INPUT are resized to (3, img_size, img_size)
-def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask_padding=0, train_ratio=1, val_ratio=0, test_ratio=0, seed=42):
+def load_dataset(inputs_dir, masks_dir, margin_masks_dir, logger, batch_size=4, img_size=512, mask_padding=0, train_ratio=1, val_ratio=0, test_ratio=0, seed=42):
 
     assert abs((train_ratio + val_ratio + test_ratio) - 1) < 1e-5, "The sum of train_ratio, val_ratio, and test_ratio must be equal to 1."
 
@@ -90,6 +130,7 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
     train_dataset = InpaintingDataset(
         inputs_dir=inputs_dir + '/train',
         masks_dir=masks_dir,
+        margin_masks_dir=margin_masks_dir,
         mask_padding=mask_padding,
         image_transforms=images_transforms_random_crop,
         masks_transforms=masks_transforms_random_crop,
@@ -99,6 +140,7 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
     val_dataset = InpaintingDataset(
         inputs_dir=inputs_dir + '/validation',
         masks_dir=masks_dir,
+        margin_masks_dir=margin_masks_dir,
         mask_padding=mask_padding,
         image_transforms=images_transforms_random_crop,
         masks_transforms=masks_transforms_random_crop,
@@ -108,6 +150,7 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
     test_dataset = InpaintingDataset(
         inputs_dir=inputs_dir + '/test',
         masks_dir=masks_dir,
+        margin_masks_dir=margin_masks_dir,
         mask_padding=mask_padding,
         image_transforms=images_transforms_random_crop,
         masks_transforms=masks_transforms_random_crop,
@@ -133,6 +176,7 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
     overfitting_dataset = InpaintingDataset(
         inputs_dir="./back/data/singleImageDataset/emptyRoom",
         masks_dir="./back/data/singleImageDataset/emptyMask",
+        margin_masks_dir="./back/data/singleImageDataset/marginMask",
         mask_padding=mask_padding,
         image_transforms=images_transforms_center_crop,
         masks_transforms=masks_transforms_center_crop,
@@ -142,6 +186,7 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
     sampling_dataset = InpaintingDataset(
         inputs_dir="./back/data/samplingDataset/",
         masks_dir="./back/data/singleImageDataset/emptyMask",
+        margin_masks_dir="./back/data/singleImageDataset/marginMask",
         mask_padding=mask_padding,
         image_transforms=images_transforms_center_crop,
         masks_transforms=masks_transforms_center_crop,
@@ -151,10 +196,11 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
     rooms_with_furniture_dataset = InpaintingDataset(
         inputs_dir="./back/data/roomsWithFurniture/rooms",
         masks_dir="./back/data/roomsWithFurniture/masks",
+        margin_masks_dir="./back/data/roomsWithFurniture/marginMasks",
         random_masks=False,
         mask_padding=mask_padding,
         image_transforms=images_transforms_center_crop,
-        masks_transforms=masks_transforms_center_crop,
+        masks_transforms=images_transforms_center_crop,
         logger=logger
     )
 
@@ -175,7 +221,7 @@ def merge_image_with_mask(input_image, mask_image):
     mask_image = mask_image.cpu().detach().numpy().transpose(1, 2, 0)
     
     # Convert to [0, 255] range
-    output_image = ((input_image + 1) * 127.5).astype(numpy.uint8)
+    output_image = ((input_image + 1) * 127.5).astype(np.uint8)
     
     # Apply black mask (R=0, G=0, B=0)
     mask = mask_image.squeeze() > 0.5
@@ -206,11 +252,11 @@ def add_padding_to_mask(mask, num_pixels=5):
     mask_np = mask.squeeze(0).cpu().numpy()  # (H, W)
 
     # Asegurar que es una máscara binaria
-    mask_np = (mask_np > 0.5).astype(numpy.uint8)
+    mask_np = (mask_np > 0.5).astype(np.uint8)
 
     # Aplicar dilatación morfológica para expandir la máscara
-    structuring_element = numpy.ones((num_pixels * 2 + 1, num_pixels * 2 + 1), dtype=numpy.uint8)
-    expanded_mask_np = binary_dilation(mask_np, structure=structuring_element).astype(numpy.float32)
+    structuring_element = np.ones((num_pixels * 2 + 1, num_pixels * 2 + 1), dtype=np.uint8)
+    expanded_mask_np = binary_dilation(mask_np, structure=structuring_element).astype(np.float32)
 
     # Convertir de nuevo a tensor y mantener el formato (1, H, W)
     expanded_mask = torch.from_numpy(expanded_mask_np).unsqueeze(0)
@@ -247,9 +293,9 @@ def save_tensor_as_grayscale_png(tensor, output_path):
     min_val = numpy_array.min()
     max_val = numpy_array.max()
     if min_val != max_val:  # Evitar división por cero
-        numpy_array = ((numpy_array - min_val) / (max_val - min_val) * 255).astype(numpy.uint8)
+        numpy_array = ((numpy_array - min_val) / (max_val - min_val) * 255).astype(np.uint8)
     else:
-        numpy_array = numpy.zeros_like(numpy_array, dtype=numpy.uint8)
+        numpy_array = np.zeros_like(numpy_array, dtype=np.uint8)
     
     # Crear una imagen PIL
     img = Image.fromarray(numpy_array, mode='L')  # 'L' indica modo escala de grises
