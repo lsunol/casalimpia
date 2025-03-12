@@ -6,12 +6,13 @@ import PIL
 from PIL import Image
 import numpy 
 from scipy.ndimage import binary_dilation
-
+import numpy as np
+from PIL import Image, ImageDraw
 
 # Define the InpaintingDataset class within the module
 class InpaintingDataset(torch.utils.data.Dataset):
 
-    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms, mask_padding, logger, random_masks=True):
+    def __init__(self, inputs_dir, masks_dir, image_transforms, masks_transforms, mask_padding, logger, total_epochs, shape_warmup_epochs_pct=0.0, random_masks=True):
         
         self.logger = logger
         self.inputs_dir = inputs_dir
@@ -23,6 +24,9 @@ class InpaintingDataset(torch.utils.data.Dataset):
         self.length_masks = len(self.mask_files)
         self.mask_padding = mask_padding
         self.random_masks = random_masks
+        self.current_epoch = 0
+        self.total_epochs = total_epochs
+        self.shape_warmup_epochs_pct = shape_warmup_epochs_pct
 
     def __len__(self):
         return len(self.input_files)
@@ -46,25 +50,30 @@ class InpaintingDataset(torch.utils.data.Dataset):
             - Both images and masks are transformed according to the dataset's transform parameters
             - Masks are cycled through using modulo operation if there are fewer masks than images
         """
+        # Calculate use_shape_masks here instead
+        use_shape_masks = self.current_epoch < (self.total_epochs * self.shape_warmup_epochs_pct)
+        
         # Load input image
         input_path = os.path.join(self.inputs_dir, self.input_files[idx])
         input_image = Image.open(input_path).convert("RGB")
         input_image = self.image_transforms(input_image)
 
-        # Pick one random mask file from directory
-        mask_idx = torch.randint(0, self.length_masks, (1,)).item() if self.random_masks else idx
-        mask_path = os.path.join(self.masks_dir, self.mask_files[mask_idx])
-        mask = Image.open(mask_path).convert("L")
-        mask = self.masks_transforms(mask)
+        if use_shape_masks:  # Use local variable instead of self.use_shape_masks
+            # Generate random shape mask
+            mask = generate_random_shape_mask(input_image.shape[-1])
+        else:
+            # Use real mask from disk
+            mask_idx = torch.randint(0, self.length_masks, (1,)).item() if self.random_masks else idx
+            mask_path = os.path.join(self.masks_dir, self.mask_files[mask_idx])
+            mask = Image.open(mask_path).convert("L")
+            mask = self.masks_transforms(mask)
 
         masked_image = merge_image_with_mask(input_image, mask)
 
         return masked_image, add_padding_to_mask(mask, self.mask_padding), input_image, mask 
 
 # Load Dataset: prepara DataLoader para el batch training. INPUT are resized to (3, img_size, img_size)
-def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask_padding=0, train_ratio=1, val_ratio=0, test_ratio=0, seed=42):
-
-    assert abs((train_ratio + val_ratio + test_ratio) - 1) < 1e-5, "The sum of train_ratio, val_ratio, and test_ratio must be equal to 1."
+def load_dataset(inputs_dir, masks_dir, num_epochs, shape_warmup_epochs_pct, logger, batch_size=4, img_size=512, mask_padding=0):
 
     images_transforms_random_crop = transforms.Compose([                                                    
         transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC),        # Redimensiona a (512, 512)
@@ -86,33 +95,25 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
     if missing_folders:
         raise ValueError(f"Missing required folders in {inputs_dir}: {', '.join(missing_folders)}")
 
+    def create_dataset(input_dir, random_masks=True):
+        return InpaintingDataset(
+            inputs_dir=input_dir,
+            masks_dir=masks_dir,
+            mask_padding=mask_padding,
+            total_epochs=num_epochs,
+            shape_warmup_epochs_pct=shape_warmup_epochs_pct,
+            image_transforms=images_transforms_random_crop,
+            masks_transforms=masks_transforms_random_crop,
+            logger=logger,
+            random_masks=random_masks,
+        )
+
     # Create the full dataset with the new transforms
-    train_dataset = InpaintingDataset(
-        inputs_dir=inputs_dir + '/train',
-        masks_dir=masks_dir,
-        mask_padding=mask_padding,
-        image_transforms=images_transforms_random_crop,
-        masks_transforms=masks_transforms_random_crop,
-        logger=logger
-    )
+    train_dataset = create_dataset(inputs_dir + '/train')
     
-    val_dataset = InpaintingDataset(
-        inputs_dir=inputs_dir + '/validation',
-        masks_dir=masks_dir,
-        mask_padding=mask_padding,
-        image_transforms=images_transforms_random_crop,
-        masks_transforms=masks_transforms_random_crop,
-        logger=logger
-    )
+    val_dataset = create_dataset(inputs_dir + '/validation')
     
-    test_dataset = InpaintingDataset(
-        inputs_dir=inputs_dir + '/test',
-        masks_dir=masks_dir,
-        mask_padding=mask_padding,
-        image_transforms=images_transforms_random_crop,
-        masks_transforms=masks_transforms_random_crop,
-        logger=logger
-    )
+    test_dataset = create_dataset(inputs_dir + '/test')
 
     logger.info(f"Train size: {len(train_dataset)}, Validation size: {len(val_dataset)}, Test size: {len(test_dataset)}")
 
@@ -134,6 +135,8 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         inputs_dir="./back/data/singleImageDataset/emptyRoom",
         masks_dir="./back/data/singleImageDataset/emptyMask",
         mask_padding=mask_padding,
+        total_epochs=num_epochs,
+        shape_warmup_epochs_pct=shape_warmup_epochs_pct,
         image_transforms=images_transforms_center_crop,
         masks_transforms=masks_transforms_center_crop,
         logger=logger
@@ -143,6 +146,8 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         inputs_dir="./back/data/samplingDataset/",
         masks_dir="./back/data/singleImageDataset/emptyMask",
         mask_padding=mask_padding,
+        total_epochs=num_epochs,
+        shape_warmup_epochs_pct=shape_warmup_epochs_pct,
         image_transforms=images_transforms_center_crop,
         masks_transforms=masks_transforms_center_crop,
         logger=logger
@@ -153,6 +158,8 @@ def load_dataset(inputs_dir, masks_dir, logger, batch_size=4, img_size=512, mask
         masks_dir="./back/data/roomsWithFurniture/masks",
         random_masks=False,
         mask_padding=mask_padding,
+        total_epochs=num_epochs,
+        shape_warmup_epochs_pct=shape_warmup_epochs_pct,
         image_transforms=images_transforms_center_crop,
         masks_transforms=masks_transforms_center_crop,
         logger=logger
@@ -259,3 +266,33 @@ def save_tensor_as_grayscale_png(tensor, output_path):
     
     # Guardar la imagen
     img.save(output_path)
+
+def generate_random_shape_mask(size=512):
+    """Generate a random shape mask (circle, rectangle or triangle)"""
+    img = Image.new('L', (size, size), 0)
+    draw = ImageDraw.Draw(img)
+    
+    shape_type = np.random.choice(['circle', 'rectangle', 'triangle'])
+    
+    # Random size between 20% and 60% of image size
+    shape_size = np.random.randint(int(size * 0.1), int(size * 0.3))
+    
+    # Random position ensuring shape fits in image
+    x = np.random.randint(shape_size, size - shape_size)
+    y = np.random.randint(shape_size, size - shape_size)
+    
+    if shape_type == 'circle':
+        draw.ellipse([x - shape_size//2, y - shape_size//2, 
+                      x + shape_size//2, y + shape_size//2], fill=255)
+    elif shape_type == 'rectangle':
+        draw.rectangle([x - shape_size//2, y - shape_size//2,
+                       x + shape_size//2, y + shape_size//2], fill=255)
+    else:  # triangle
+        points = [
+            (x, y - shape_size//2),
+            (x - shape_size//2, y + shape_size//2),
+            (x + shape_size//2, y + shape_size//2)
+        ]
+        draw.polygon(points, fill=255)
+    
+    return transforms.ToTensor()(img)
