@@ -630,6 +630,8 @@ def main():
         "inference_steps": args.inference_steps,
         "lr_scheduler": args.lr_scheduler,
         "overfitting": args.overfitting,
+        "shape_warmup_epochs_pct": args.shape_warmup_epochs_pct,
+        "train_unet": args.train_unet,
         })
 
     train_lora(model_id, 
