@@ -260,7 +260,13 @@ def train_lora(model_id, train_loader, test_loader, val_loader, sampling_loader,
     # Congelar gradientes para VAE, text encoder y U-Net (se entrena solo LoRA)
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    unet.requires_grad_(False)
+    unet.requires_grad_(args.train_unet)
+    logger.info(f"UNet training enabled: {args.train_unet}")
+    if args.train_unet:
+        wandb_run.tags = wandb_run.tags + ("TRAIN_UNET",)
+
+    # Update wandb config with UNet training status
+    wandb.config.update({"train_unet": args.train_unet})
 
     # Enviar modelos a GPU y configurar tipo de dato
     unet.to(device, dtype=torch.float32)                    #PUSE UNET EN 32
@@ -561,6 +567,8 @@ def read_parameters():
     parser.add_argument("--save-epoch-result-images", action="store_true", help="Save result images after each epoch")
     parser.set_defaults(save_epoch_result_images=False)
     parser.add_argument("--shape-warmup-epochs-pct", type=float, default=0.0, help="Percentage of epochs to train with basic shape masks before real masks (0.0-1.0)")
+    parser.add_argument("--train-unet", action="store_true", help="Enable training of UNet")
+    parser.set_defaults(train_unet=False)
     
     args = parser.parse_args()
 
