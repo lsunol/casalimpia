@@ -408,7 +408,7 @@ During training, we applied these metrics to images that were originally empty, 
 Selecting the optimal method for auto-generating high-quality masks to isolate objects (furniture) from room images.
 #### Setup
 **Firstly**, we began with an initial code using the **MIT ADE20K** model, implementing six basic mask generation methods to refine segmentation:  
-|   |   |
+| method  | description  |
 |---|---|
 |**Raw Mask** | Directly derived from the segmentation output, serving as the baseline with unprocessed foreground isolation. |
 |**Cleaned Mask** | Applied `clean_mask` with a 7x7 kernel to remove small isolated noise regions using binary opening, though it often left gaps.|
@@ -476,14 +476,17 @@ To illustrate the results of this experiment, we present the following 2 images.
 These are 3 samples of the best `PSNR` results:  
 ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img19.png?raw=true)  
 The visual result of the best run, achieved at the epoch 1200
+
+
 | Masked image | Ground truth | Inferred result |
-|<td colspan="3"> ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img20.png?raw=true)</td> |
+| --- | --- | --- |
+|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img204.png?raw=true) | ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img205.png?raw=true) |![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img206.png?raw=true)|
 
 #### Conclusions
 
 The experiment confirmed that our pipeline functions correctly, as the model successfully memorized the image, proving the integration of LoRA and VAE. Additionally, the model demonstrated a capacity for plausible detail reconstruction beyond what was provided in the input, indicating that inpainting benefits from learned priors. While overfitting ensures the system works, real training must avoid excessive memorization to maintain generalization.
 
-### Experiment 3: Margin Mask**
+### Experiment 3: Margin Mask
 
 #### Hypothesis
 Despite training with empty room photos and object masks, the model still hallucinates objects during inference on previously furnished images. We believe this occurs because masks fail to capture certain artifacts that trigger hallucinations—including undetected object fragments, shadows, lighting effects, and other object-related visual cues.
@@ -548,7 +551,7 @@ On the other hand, as already mentioned, one of the definitive selection criteri
 
 | input image           | inferred image     | ground truth image |
 | ---                   | ---                | ---                |
-|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img201.png?raw=true)|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img202.png?raw=true) |![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img203.png?raw=true) |
+|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/201.png?raw=true)|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/202.png?raw=true) |![](https://github.com/lsunol/casalimpia/blob/main/docs/images/203.png?raw=true) |
 
 In addition, we also leveraged **Weights & Biases Sweeps** to get automated results. This allowed us to systematically explore different configurations and identify which parameters had the strongest correlation with PSNR.
 
@@ -603,22 +606,26 @@ The project has laid a strong foundation for inpainting empty rooms, but several
 
 Our initial results were poor due to an implementation issue that affected how the inpainting mask was applied. Specifically, there was a misalignment between the masked area in the input image and the mask provided to the model. This caused the model to attempt inpainting over an unintended region, often leading to unnatural borders and artifacts. Although the training loss was decreasing, the model struggled to overcome this inconsistency:  
 
-| masked image | inferred image | ground truth|
-|<td colspan="3"> ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img26.png?raw=true) </td>|
+| masked image  | ground truth| inferred image |
+| --- | --- | --- |
+| ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img261.png?raw=true)| ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img263.png?raw=true)| ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img262.png?raw=true) |
 
 Once we identified and fixed this bug, achieving overfitting on a single image became much easier. By training the model with only one image and its corresponding mask, we were able to reach a state where the model almost perfectly reconstructed the target. This proved that our training pipeline was functioning correctly and that the LoRA adaptation was working as expected:  
 | masked image | ground truth| inferred image |
-|<td colspan="3"> ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img27.png?raw=true) </td>|
+| --- | --- | --- |
+| ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img271.png?raw=true)|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img272.png?raw=true)|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img273.png?raw=true)|
 
 However, throughout our training process, we noticed that the masks used did not always align with the background structure of the room in terms of geometry, size, and perspective. This led us to experiment with an initial warmup phase where, instead of using complex object-shaped masks, we applied simple geometric shapes. This approach allowed the model to first learn to fill in basic missing regions before handling more intricate inpainting tasks. The results from this warmup phase were promising, as the model was able to handle these simpler cases quite effectively:  
 
 | masked image | ground truth| inferred image |
-|<td colspan="3"> ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img28.png?raw=true) </td>|
+| --- | --- | --- |
+| ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img281.png?raw=true) |![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img282.png?raw=true) |![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img283.png?raw=true) |
 
 
 Finally, we tested our model on real furnished rooms where objects were naturally placed within the scene rather than overlaid. Here, the model often failed to produce the desired results. Instead of removing objects completely, it tended to replace them with stylistically similar elements, rather than generating an empty space. This suggests that the model is strongly biased toward object reconstruction rather than true object removal:  
 | masked image | ground truth| inferred image |
-|<td colspan="3"> ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img29.png?raw=true) </td>|
+| --- | --- | --- |
+| ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img291.png?raw=true) |![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img292.png?raw=true) |![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img293.png?raw=true) |
 
 ## Conclusions
 
