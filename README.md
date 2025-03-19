@@ -180,7 +180,7 @@ Unfortunately, this paper remains solely an academic publication, as the authors
 
 The following image presents their pipeline:
 
-![][image1]  
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img1.png?raw=true)  
 
 ### Conclusions obtained from the paper
 
@@ -220,8 +220,8 @@ Unfortunately, we do not have the set of images needed or access to the dataset 
 We needed a similar strategy or idea of *rendering* images in the unfurnished spaces. Then our plan for the dataset is to fetch one empty room image and another unrelated room with furniture, calculate the binary mask of the room with furniture, and overlay the mask in the room.   
   
 We decided to experiment with bedrooms and living room spaces, since these are the places where most of the furniture can be found in a flat or house.  
-  
-![][image2]  
+
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img2.png?raw=true)  
 Then we need:  
 * **Input** (synthetic data): Unfurnished room image with a binary mask of an unrelated room with furniture on top of the empty room image.  
 * **Masks**: The mask of a unrelated furnished room for the overlaid images.  
@@ -252,7 +252,7 @@ Once we have the dataset, we need to generate the masks for the inpainting proce
 The generation of these masks would serve for two purposes:
 
 1) **TRAINING**: overlay mask in the unfurnished room images during the training process. In this way, we were able to generate the Input Synthetic data and generate the conditioning context for predicting the proper noise.  
-   ![][image3]
+   ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img3.png?raw=true)
 
 2) **INFERENCE**: semantic masks for the inference process for the furnished room images. There will be the traditional approach of using the masks for conditioning the output
 
@@ -270,7 +270,7 @@ Under the section *Experiments and Learning*, we show the different results obta
 
 So far, our data collection and mask generation strategy can be resumed in the following diagram.
 
-![][image4]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img4.png?raw=true)
 
 #### Train, test and validation
 
@@ -280,7 +280,7 @@ We divided our dataset into three subsets to ensure proper training, validation,
 
 Since our problem falls under the GEN AI Inpainting Problems category, we will use the Stable Diffusion model for inpainting, also known as a latent diffusion model. In a nutshell, this kind of model is a composition of different models working in conjunction, therefore it is considered a pipeline. The main relevance of this workflow is that the process or analysis is happening at the latent space level, meaning that computational resources are lower than if the process occurs at the pixel level.
 
-![][image5]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img5.png?raw=true)
 
 #### Element Responsibilities
 
@@ -305,7 +305,7 @@ Therefore, we decided to test the stable diffusion model for inpainting since, b
 
 For the testing, we created a notebook with an interactive loop where by each iteration five outputs were generated, and each one of them will count with different variations in the hyperparameters, particularly for the guidance scale and prompts, since we are trying mainly to guide the model to the best outcome. In the following image, we can see the main idea for testing the current state-of-the-art
 
-![][image6]  
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img6.png?raw=true)  
 
 > [!TIP]
 > You can play around with the two different masks and interactive inference process in the following colab [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1c3cLX94FvBr9BxmHG3IK45w4aRLmfr-E?usp=sharing)
@@ -314,7 +314,7 @@ Results for different variations in different iterations follow:
 
 | Input image      | Mask          | Results on the first iteration
 | :---:            | :---:         | :---:
-| ![][image7]      | ![][image8]   | ![][image9] 
+| ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img7.png?raw=true)      | ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img8.png?raw=true)   | ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img9.png?raw=true) 
 
 From the image above, we can see that only 1 out of 5 output images is going in the proper direction, this is a challenge for our goal since we are expecting the first iteration of the five images to be unfurnished and keeping the room dimensions and not altering their background. On the other side, in variation 3, we can see that the shadows are another problem where future mask generations are not able to capture any objects in the room.
 
@@ -322,28 +322,28 @@ Finally, we can conclude that the shadows of the images can provoke hallucinatio
 
 Hence, we hypothesize that fine-tuning of the SD could bring better results. The LoRA (Low-Rank Adaptation) concept was decided to be used as a technique since it does not involve fine-tuning all the parameters of the model, only to add more parameters and train only the new ones. The image below shows the concept of LoRA:
 
-![][image10]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img10.png?raw=true)
 
 #### Our pipelines for inpainting (training vs inference)
 
 ##### Training
 
 Pre-processing Input Image  
-![][image11]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img11.png?raw=true)
 
 Our input data is a synthetic furnished room (the overlay unrelated furniture room binary mask image put over the unfurnished room space).  
 The image above indicates how we prepared the input image.
 
 ###### Forward Process
 
-![][image12]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img12.png?raw=true)
 
 * The input image and mask are encoded through the VAE into the latent space.  
 * A random timestep (t) is selected per each training iteration, where a Gaussian noise (ε) is sampled with the same shape as the latent representation. The intensity of noise is determined by the noise schedule. Later, the noise is applied only to the latent image, resulting in a noisy latent that will be fed into the U-Net.
 
 ###### Complete Fine-Tuning Training Process
 
-![][image13]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img13.png?raw=true)
 
 Once the latent image with noise and latent mask are generated, the conditioning part will be made of text prompts, including negative prompts, the latent mask and the scheduler that will inform the U-Net the intensity of noise added by each step.  
 The U-Net will be fed with the latent image with noise (*noisy latent*) and the conditioning attributes guiding the U-Net to predict the added noise. During this learning process only the layers of LoRa mainly attached to the cross-attentions U-Net layers will be called for predicting the noise. Therefore, they will be affected in the backpropagation process.
@@ -354,16 +354,17 @@ After the predicted noise is calculated, the loss calculation is triggered where
 
 ###### Initialization
 
-![][image14]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img14.png?raw=true)
 
-![][image15]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img15.png?raw=true)
 
 In this stage, the original image (furnished room image) is concatenated with its mask and encoded to the latent space.  
 Pure random noise is only added to the mask region of the concatenated image, meaning that the unmasked region retains its original latent values.
 
 ###### Complete inference process
 
-![][image16]  
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img16.png?raw=true)
+
 After initializing, the process, we will need to define the hyperparameters such as time steps and prompt, which will serve as conditional signals that will be fed into the U-Net along with the noisy latent  
 During the Denoising process, the U-Net using the LoRa pre-trained weights will remove the added noise of the mask region from the Noisy latent input. This will be a loop with an end of *t* inference steps. By each *t* step, the previous output of the U-Net is used as Input for the next Step.  
 During this recurrent process, only the mask region should be altered, the rest of the latent values are preserved.  
@@ -432,19 +433,19 @@ Despite these efforts, the masks consistently failed to segment fine structures 
 
 | Example using **MIT ADE20K**|
 | --- |
-| ![][image100] |
+| ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img100.png?raw=true) |
 
 | Example using **ckpt/ade20k-resnet50dilated-ppm_deepsup**|
 |---|
-|![][image101]|
+|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img101.png?raw=true)|
 
 | Example using **OneFormer** |
 |---|
-|![][image102]|
+|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img102.png?raw=true)|
 
 | Example of the mask from image with border|
 |---|
-|![][image17] ![][image18]|
+|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img17.png?raw=true) ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img18.png?raw=true)|
 
 The initial ADE20K and COCO-based methods, even with extensive post-processing, produced masks with significant gaps and failed to detect fine details like chair legs, rendering them unsuitable for inpainting. The ade20k-resnet50dilated-ppm\_deepsup checkpoint offered marginal improvements but introduced holes and misplaced spots, further highlighting its limitations. In contrast, OneFormer delivered precise masks that captured intricate structures, forming the basis for the final training dataset and proving superior for local training and evaluation.
 
@@ -473,10 +474,10 @@ We used a single input image with its corresponding mask and target output, runn
 The best overfitting run reached a `PSNR` of 30.12, with the model visually reproducing the target image by epoch 1200. Consequently, the model correctly reconstructed fine details such as the wall socket and ceiling lights, even though they were masked out in the input. This suggests that the model learned to infer missing details based on structural patterns and prior knowledge embedded in Stable Diffusion's training data.   
 To illustrate the results of this experiment, we present the following 2 images.   
 These are 3 samples of the best `PSNR` results:  
-![][image19]  
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img19.png?raw=true)  
 The visual result of the best run, achieved at the epoch 1200
 | Masked image | Ground truth | Inferred result |
-|<td colspan="3"> ![][image20]</td> |
+|<td colspan="3"> ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img20.png?raw=true)</td> |
 
 #### Conclusions
 
@@ -537,17 +538,17 @@ By systematically tuning hyperparameters, we aim to identify an optimal configur
 
 As an example, the guide of the search and the best results (light green) can be observed in the next table:
 
-![][image21]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img21.png?raw=true)
 
 On the one hand, the basic selection criterion has been fundamental metrics such as `PSNR` or losses. Below is an example of optimizer selection based on PSNR calculated at each epoch, where Adagrad (red one) emerged as the standout performer, successfully completing all 100 epochs unlike the other optimizers.
 
-![][image22]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img22.png?raw=true)
 
 On the other hand, as already mentioned, one of the definitive selection criteria has been a visual inspection of the results, since metrics can be misleading, especially due to the effect of shadows. An example of one of the best runs of `guidance scale` (value of 7.5) can be observed in the following samples illustration.
 
 | input image           | inferred image     | ground truth image |
 | ---                   | ---                | ---                |
-|<td colspan="3"> ![][image23] </td>|
+|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img201.png?raw=true)|![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img202.png?raw=true) |![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img203.png?raw=true) |
 
 In addition, we also leveraged **Weights & Biases Sweeps** to get automated results. This allowed us to systematically explore different configurations and identify which parameters had the strongest correlation with PSNR.
 
@@ -566,11 +567,11 @@ We conducted nearly 200 runs, varying the following parameters:
 After analysing the results, we found that initial learning rate, learning rate scheduler, and LoRA dropout had the highest impact on overfitting performance, showing the strongest correlation with final PSNR.  
 The following figure illustrates the PSNR obtained across different runs, highlighting the influence of these parameters:
 
-![][image24]  
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img24.png?raw=true) 
 
 Additionally, we computed correlation coefficients to determine which parameters influenced PSNR the most. The following visualization demonstrates the impact of each hyper-parameter on the final results:
 
-![][image25]
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img25.png?raw=true)
 
 Our hyper-parameter analysis revealed that LoRA dropout, LoRA alpha, and initial learning rate had the most significant impact on training performance, showing similar importance levels. While guidance scale also influenced PSNR, it is an inference parameter rather than a training factor, meaning it improves output quality but does not directly affect model convergence.
 
@@ -592,7 +593,7 @@ The project has laid a strong foundation for inpainting empty rooms, but several
 3. **Mitigating Shadow Effects**: Shadows in images, not covered by masks, can mislead the diffusion model into interpreting them as cues for object placement, contrary to our goal of generating empty rooms. Future work will explore shadow detection and removal techniques, such as integrating shadow segmentation models or preprocessing images to minimize shadow effects, ensuring the model focuses solely on structural elements and improves the realism of inpainted backgrounds.  
      
 4. **Incorporating edge detection**: Inspired by [EdgeConnect](https://medium.com/data-science/lines-first-color-next-an-inspirational-deep-image-inpainting-approach-b2d980efb364#:~:text=%E2%80%9CLines%20First%2C%20Color%20Next%E2%80%9D%20An,The%20first%20generator%20is), we plan to enhance inpainting by first generating edge maps that define room boundaries, such as transitions between walls, floors, ceilings, windows, and non-removable objects. By creating these structural edges before inpainting, the model can better preserve the room’s geometry and focus inpainting efforts on the masked regions, potentially leading to more seamless and contextually accurate results, which will be tested on Google Cloud with the refined dataset.
-![][image103]  
+![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img103.png?raw=true)  
 
 5. **Training UNet directly without LoRA on GoogleCloud**: The current approach uses LoRA for efficient fine-tuning, but directly training the UNet without LoRA on Google Cloud could unlock higher performance by allowing full parameter optimization. This resource-intensive experiment will leverage Google Cloud’s A100 GPUs to train the entire UNet on the 13,000-image dataset, potentially improving inpainting quality at the cost of increased computational demands, offering a benchmark to compare against the LoRA-based results.  
      
@@ -603,21 +604,21 @@ The project has laid a strong foundation for inpainting empty rooms, but several
 Our initial results were poor due to an implementation issue that affected how the inpainting mask was applied. Specifically, there was a misalignment between the masked area in the input image and the mask provided to the model. This caused the model to attempt inpainting over an unintended region, often leading to unnatural borders and artifacts. Although the training loss was decreasing, the model struggled to overcome this inconsistency:  
 
 | masked image | inferred image | ground truth|
-|<td colspan="3"> ![][image26] </td>|
+|<td colspan="3"> ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img26.png?raw=true) </td>|
 
 Once we identified and fixed this bug, achieving overfitting on a single image became much easier. By training the model with only one image and its corresponding mask, we were able to reach a state where the model almost perfectly reconstructed the target. This proved that our training pipeline was functioning correctly and that the LoRA adaptation was working as expected:  
 | masked image | ground truth| inferred image |
-|<td colspan="3"> ![][image27] </td>|
+|<td colspan="3"> ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img27.png?raw=true) </td>|
 
 However, throughout our training process, we noticed that the masks used did not always align with the background structure of the room in terms of geometry, size, and perspective. This led us to experiment with an initial warmup phase where, instead of using complex object-shaped masks, we applied simple geometric shapes. This approach allowed the model to first learn to fill in basic missing regions before handling more intricate inpainting tasks. The results from this warmup phase were promising, as the model was able to handle these simpler cases quite effectively:  
 
 | masked image | ground truth| inferred image |
-|<td colspan="3"> ![][image28] </td>|
+|<td colspan="3"> ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img28.png?raw=true) </td>|
 
 
 Finally, we tested our model on real furnished rooms where objects were naturally placed within the scene rather than overlaid. Here, the model often failed to produce the desired results. Instead of removing objects completely, it tended to replace them with stylistically similar elements, rather than generating an empty space. This suggests that the model is strongly biased toward object reconstruction rather than true object removal:  
 | masked image | ground truth| inferred image |
-|<td colspan="3"> ![][image29] </td>|
+|<td colspan="3"> ![](https://github.com/lsunol/casalimpia/blob/main/docs/images/img29.png?raw=true) </td>|
 
 ## Conclusions
 
